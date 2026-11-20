@@ -1,0 +1,203 @@
+name: Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      only_cache:
+        description: "Only build and cache the libraries, skip the client"
+        type: boolean
+        default: false
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    env:
+      PREPARE_PATH: "Telegram/build/prepare/prepare.py"
+      APP_VERSION: "1.0.4"
+
+    defaults:
+      run:
+        shell: cmd
+
+    steps:
+      - name: Check secrets.
+        shell: bash
+        env:
+          API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          if [ -z "$API_ID" ] || [ -z "$API_HASH" ]; then
+            echo "TDESKTOP_API_ID and TDESKTOP_API_HASH secrets are required."
+            exit 1
+          fi
+
+      - name: Free up disk space.
+        shell: bash
+        run: |
+          df -h /c
+          rm -rf /c/Android "/c/Program Files (x86)/Android" "/c/Program Files/Android" /c/Julia /c/hostedtoolcache/windows/Ruby /c/hostedtoolcache/windows/go /c/hostedtoolcache/windows/Java_* "/c/Program Files/PostgreSQL" "/c/Program Files/MongoDB" "/c/Program Files/Google" "/c/Program Files (x86)/Microsoft SDKs/Azure" "/c/Program Files/Microsoft SQL Server" "/c/Program Files/LLVM" "/c/Program Files/MySQL" /c/Strawberry /c/SeleniumWebDrivers "/c/Users/runneradmin/.cargo" "/c/Users/runneradmin/.rustup" "/c/Program Files (x86)/Microsoft/Edge" || true
+          df -h /c
+
+      - name: Configure pagefile.
+        uses: al-cheb/configure-pagefile-action@v1.4
+        with:
+          minimum-size: 16GB
+          maximum-size: 24GB
+          disk-root: "C:"
+
+      - name: Prepare directories.
+        run: |
+          mkdir %userprofile%\TBuild\Libraries
+          mklink /d %GITHUB_WORKSPACE%\TBuild %userprofile%\TBuild
+          echo TBUILD=%GITHUB_WORKSPACE%\TBuild>>%GITHUB_ENV%
+          echo LibrariesPath=%GITHUB_WORKSPACE%\TBuild\Libraries\win64>>%GITHUB_ENV%
+
+      - name: Get repository name.
+        shell: bash
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY##*/}" >> $GITHUB_ENV
+
+      - name: Clone.
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          path: ${{ env.TBUILD }}\${{ env.REPO_NAME }}
+
+      - name: First set up.
+        shell: bash
+        run: |
+          DOCPATH=$TBUILD/$REPO_NAME/docs/building-win.md
+          SDK="$(grep "SDK version" $DOCPATH | sed -r 's/.*\*\*(.*)\*\* SDK version.*/\1/')"
+          echo "SDK=$SDK" >> $GITHUB_ENV
+
+          sed -i '/CMAKE_${lang}_FLAGS_DEBUG_INIT/s/${_Zi}//' "$PROGRAMFILES"/CMake/share/cmake*/Modules/Platform/Windows-MSVC.cmake
+
+          echo "vrg-libs-1" >> CACHE_KEY.txt
+          echo "$SDK" >> CACHE_KEY.txt
+          echo "CACHE_KEY=$(sha256sum CACHE_KEY.txt | awk '{ print $1 }')" >> $GITHUB_ENV
+
+          git config --global user.email "you@example.com"
+          git config --global user.name "Sample"
+
+      - uses: Eden-CI/msvc-dev-cmd@master
+        name: Native Tools Command Prompt.
+        with:
+          arch: x64
+          sdk: ${{ env.SDK }}
+          toolset: "14.44"
+
+      - name: NuGet sources.
+        run: |
+          nuget sources Disable -Name "Microsoft Visual Studio Offline Packages"
+          nuget sources Add -Source https://api.nuget.org/v3/index.json & exit 0
+
+      - name: ThirdParty cache.
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TBUILD }}\ThirdParty
+          key: ${{ runner.OS }}-x64-third-party-${{ env.CACHE_KEY }}
+          restore-keys: ${{ runner.OS }}-x64-third-party-
+
+      - name: Libraries cache restore.
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-libs-release-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          restore-keys: ${{ runner.OS }}-x64-libs-release-${{ env.CACHE_KEY }}-
+
+      - name: Qt cache restore.
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-qt6-release-${{ env.CACHE_KEY }}-${{ github.run_id }}
+          restore-keys: ${{ runner.OS }}-x64-qt6-release-${{ env.CACHE_KEY }}-
+
+      - name: Libraries.
+        timeout-minutes: 330
+        run: |
+          %TBUILD%\%REPO_NAME%\Telegram\build\prepare\win.bat silent qt6
+
+      - name: Free up some disk space.
+        if: always()
+        shell: bash
+        run: |
+          find $LibrariesPath '(' '(' ! '(' -name '*.lib' -o -name '*.a' -o -name '*.exe' -o -name '*.h' -o -name '*.hpp' -o -name '*.inc' -o -name '*.cmake' -o -name '*.pc' -o -path '*/include/*' -o -path '*/objects-*' -o -path '*/cache_keys/*' -o -path '*/patches/*' -o -path '*/nv-codec-headers/*' -o -path '*/tdesktop_rust/out/*' ')' -type f ')' -o -empty ')' -delete
+          find $LibrariesPath -type d '(' -name Debug -o -name 'out.dbg' ')' -prune -exec rm -rf '{}' +
+          df -h /c /d || true
+
+      - name: Libraries cache save.
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\*
+            !${{ env.LibrariesPath }}\cache_keys
+            !${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\*
+            !${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-libs-release-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: Qt cache save.
+        if: always()
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ env.LibrariesPath }}\[qQ]t[_-]*
+            ${{ env.LibrariesPath }}\cache_keys\[qQ]t[_-]*
+          key: ${{ runner.OS }}-x64-qt6-release-${{ env.CACHE_KEY }}-${{ github.run_id }}
+
+      - name: VRG build.
+        if: ${{ !inputs.only_cache }}
+        env:
+          TDESKTOP_API_ID: ${{ secrets.TDESKTOP_API_ID }}
+          TDESKTOP_API_HASH: ${{ secrets.TDESKTOP_API_HASH }}
+        run: |
+          if not exist D:\VRGout mkdir D:\VRGout
+          mklink /J "%TBUILD%\%REPO_NAME%\out" D:\VRGout
+          cd %TBUILD%\%REPO_NAME%\Telegram
+
+          call configure.bat ^
+          x64 ^
+          qt6 ^
+          -D TDESKTOP_API_ID=%TDESKTOP_API_ID% ^
+          -D TDESKTOP_API_HASH=%TDESKTOP_API_HASH% ^
+          -D CMAKE_CONFIGURATION_TYPES=Release ^
+          -D DESKTOP_APP_DISABLE_AUTOUPDATE=ON ^
+          -D DESKTOP_APP_DISABLE_CRASH_REPORTS=ON
+
+          cmake --build ..\out --config Release --parallel 1 -- /p:CL_MPCount=3
+
+      - name: Package.
+        if: ${{ !inputs.only_cache }}
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:TBUILD "$env:REPO_NAME\out\Release"
+          $dist = Join-Path $env:GITHUB_WORKSPACE "dist"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item (Join-Path $out "Telegram.exe") (Join-Path $dist "VRG.exe")
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile (Join-Path $dist "yt-dlp.exe")
+          choco install innosetup --no-progress -y
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          $script = Join-Path $env:TBUILD "$env:REPO_NAME\tools\vrg-installer\vrg.iss"
+          & $iscc "/DAppVersion=$env:APP_VERSION" "/DSourceDir=$dist" "/DOutputDir=$dist" $script
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Compress-Archive -Path (Join-Path $dist "VRG.exe"), (Join-Path $dist "yt-dlp.exe") -DestinationPath (Join-Path $dist "VRG-windows-x64.zip")
+
+      - uses: actions/upload-artifact@v7
+        name: Upload artifact.
+        if: ${{ !inputs.only_cache }}
+        with:
+          name: VRG-windows-x64
+          path: |
+            dist\VRG-Setup.exe
+            dist\VRG-windows-x64.zip
+          retention-days: 14
