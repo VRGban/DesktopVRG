@@ -613,7 +613,6 @@ void Domain::scheduleWriteAccounts() {
 }
 
 int Domain::maxAccounts() const {
-	// VRG+: the account limit is chosen in settings (3..10).
 	if (const auto vrg = Vrg::Conf::Int("accounts_max", 10); vrg > 0) {
 		return std::clamp(vrg, int(kMaxAccounts), Vrg::kMaxAccounts);
 	}

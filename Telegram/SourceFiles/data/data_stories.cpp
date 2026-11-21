@@ -1403,7 +1403,7 @@ void Stories::sendMarkAsReadRequest(
 	};
 
 	if (Vrg::Ghost::Stories()) {
-		finish(); // VRG ghost mode: watch stories without being listed
+		finish();
 		return;
 	}
 

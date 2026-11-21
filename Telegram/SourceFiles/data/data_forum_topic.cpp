@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "data/data_forum_topic.h"
+#include "vrg/vrg_ghost_mentions.h"
 
 #include "data/data_channel.h"
 #include "data/data_changes.h"
@@ -427,7 +428,10 @@ void ForumTopic::applyTopic(const MTPDforumTopic &data) {
 			data.vunread_count().v);
 		_replies->setOutboxReadTill(data.vread_outbox_max_id().v);
 		applyTopicTopMessage(data.vtop_message().v);
-		unreadMentions().setCount(data.vunread_mentions_count().v);
+		unreadMentions().setCount(Vrg::GhostMentions::Adjusted(
+			peer()->id.value,
+			_rootId.bare,
+			data.vunread_mentions_count().v));
 		unreadReactions().setCount(data.vunread_reactions_count().v);
 		unreadPollVotes().setCount(data.vunread_poll_votes_count().v);
 	}

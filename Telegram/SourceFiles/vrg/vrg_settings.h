@@ -73,6 +73,7 @@ namespace Settings {
 [[nodiscard]] inline Type VrgLookId();
 [[nodiscard]] inline Type VrgPlayerId();
 [[nodiscard]] inline Type VrgMiscId();
+[[nodiscard]] inline Type VrgSecurityId();
 [[nodiscard]] inline Type VrgAutoReplyId();
 [[nodiscard]] inline Type VrgVoiceChangerId();
 [[nodiscard]] inline Type VrgFakeProfileId();
@@ -80,7 +81,7 @@ namespace Settings {
 
 namespace VrgDetail {
 
-inline constexpr auto kVersion = "1.0.5";
+inline constexpr auto kVersion = "1.0.6";
 
 [[nodiscard]] inline QString Ru(const char *text) {
 	return QString::fromUtf8(text);
@@ -1699,6 +1700,24 @@ public:
 			rpl::never<bool>(),
 			Ru("Показывает окно подтверждения при выборе GIF."));
 
+
+		Ui::ResizeFitChild(this, content);
+	}
+
+	[[nodiscard]] rpl::producer<QString> title() override {
+		return rpl::single(VrgDetail::Ru("Удобство"));
+	}
+};
+
+class VrgSecurity : public Section<VrgSecurity> {
+public:
+	VrgSecurity(
+		QWidget *parent,
+		not_null<Window::SessionController*> controller)
+	: Section(parent, controller) {
+		using VrgDetail::Ru;
+		const auto content = Ui::CreateChild<Ui::VerticalLayout>(this);
+
 		VrgDetail::AddCaption(content, Ru("Защита и пароли"));
 
 		const auto promptPassword = [=](
@@ -1886,7 +1905,7 @@ public:
 	}
 
 	[[nodiscard]] rpl::producer<QString> title() override {
-		return rpl::single(VrgDetail::Ru("Удобство"));
+		return rpl::single(VrgDetail::Ru("Защита и пароли"));
 	}
 };
 
@@ -2201,6 +2220,7 @@ public:
 		open("Фейк-профиль", VrgFakeProfileId, &st::menuIconStealth);
 		open("Автоответчик", VrgAutoReplyId, &st::menuIconBot);
 		open("Удобство", VrgMiscId, &st::menuIconInfo);
+		open("Защита и пароли", VrgSecurityId, &st::menuIconLock);
 
 		VrgDetail::AddCaption(content, Ru("Ссылки"));
 		AddButtonWithLabel(
@@ -2369,6 +2389,7 @@ inline Type VrgDeletedId() { return VrgDeleted::Id(); }
 inline Type VrgLookId() { return VrgLook::Id(); }
 inline Type VrgPlayerId() { return VrgPlayer::Id(); }
 inline Type VrgMiscId() { return VrgMisc::Id(); }
+inline Type VrgSecurityId() { return VrgSecurity::Id(); }
 inline Type VrgAutoReplyId() { return VrgAutoReply::Id(); }
 inline Type VrgVoiceChangerId() { return VrgVoiceChanger::Id(); }
 inline Type VrgFakeProfileId() { return VrgFakeProfile::Id(); }

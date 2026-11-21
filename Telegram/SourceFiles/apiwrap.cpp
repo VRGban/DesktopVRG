@@ -7,6 +7,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "apiwrap.h"
 #include "vrg/vrg_ghost.h"
+#include "vrg/vrg_ghost_mentions.h"
 #include "vrg/vrg_voice_changer.h"
 #include "base/timer.h"
 
@@ -1483,6 +1484,14 @@ void ApiWrap::markContentsRead(
 	for (const auto &item : items) {
 		const auto blockServer = Vrg::Ghost::ShouldBlockRead(
 			item->history()->peer->id.value) || Vrg::Ghost::VoiceContents();
+		if (item->isRegular()
+			&& item->isUnreadMention()
+			&& Vrg::Ghost::ShouldBlockRead(item->history()->peer->id.value)) {
+			Vrg::GhostMentions::Record(
+				item->history()->peer->id.value,
+				item->topicRootId().bare,
+				item->id.bare);
+		}
 		if (!item->markContentsRead(true) || !item->isRegular() || blockServer) {
 			continue;
 		}
@@ -1510,6 +1519,14 @@ void ApiWrap::markContentsRead(
 void ApiWrap::markContentsRead(not_null<HistoryItem*> item) {
 	const auto blockServer = Vrg::Ghost::ShouldBlockRead(
 		item->history()->peer->id.value) || Vrg::Ghost::VoiceContents();
+	if (item->isRegular()
+		&& item->isUnreadMention()
+		&& Vrg::Ghost::ShouldBlockRead(item->history()->peer->id.value)) {
+		Vrg::GhostMentions::Record(
+			item->history()->peer->id.value,
+			item->topicRootId().bare,
+			item->id.bare);
+	}
 	if (!item->markContentsRead(true) || !item->isRegular() || blockServer) {
 		return;
 	}

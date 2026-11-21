@@ -68,6 +68,9 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #include <QtWidgets/QTextEdit>
 #include <QtWidgets/QToolButton>
 #include <QtWidgets/QVBoxLayout>
+#include <QtWidgets/QListWidget>
+#include <QtWidgets/QMenu>
+#include <QtGui/QShortcut>
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -316,6 +319,7 @@ enum class Glyph {
 	HeartFilled,
 	Lyrics,
 	Eq,
+	Queue,
 };
 
 [[nodiscard]] QString FormatTime(qint64 ms) {
@@ -556,6 +560,24 @@ void PaintGlyph(QPainter &p, Glyph glyph, const QRectF &rect, QColor color) {
 			knobs.addEllipse(QPointF(12., 15.), 2.2, 2.2);
 			knobs.addEllipse(QPointF(18., 10.5), 2.2, 2.2);
 			return knobs;
+		}());
+	} break;
+	case Glyph::Queue: {
+		QPainterPath path;
+		path.moveTo(5., 7.);
+		path.lineTo(19., 7.);
+		path.moveTo(5., 12.);
+		path.lineTo(14., 12.);
+		path.moveTo(5., 17.);
+		path.lineTo(11., 17.);
+		strokePath(path);
+		fillPath([&] {
+			QPainterPath tri;
+			tri.moveTo(16., 14.);
+			tri.lineTo(21., 17.);
+			tri.lineTo(16., 20.);
+			tri.closeSubpath();
+			return tri;
 		}());
 	} break;
 	}
@@ -1162,7 +1184,7 @@ protected:
 		setTitle(rpl::single(u"Эквалайзер и усиление"_q));
 		const auto content = Ui::CreateChild<QWidget>(this);
 		SetQss(content, QStringLiteral(
-			"background: #0c0c0e; border-top: 1px solid #222226; border-bottom: 1px solid #222226;"));
+			"background: #000000; border: none;"));
 		const auto root = new QVBoxLayout(content);
 		root->setContentsMargins(20, 14, 20, 14);
 		root->setSpacing(14);
@@ -1172,9 +1194,9 @@ protected:
 			content);
 		enableBtn->setCursor(Qt::PointingHandCursor);
 		SetQss(enableBtn, QStringLiteral(
-			"QPushButton { background: #1c1c1f; color: #ffffff; border: 1px solid #2e2e34; "
-			"border-radius: 10px; padding: 8px 14px; font-weight: 600; font-size: 13px; }"
-			"QPushButton:hover { background: #28282d; }"));
+			"QPushButton { background: #111113; color: #ffffff; border: none; "
+			"border-radius: 10px; padding: 9px 14px; font-weight: 600; font-size: 13px; }"
+			"QPushButton:hover { background: #1c1c1f; }"));
 		root->addWidget(enableBtn);
 
 		const auto presetsLayout = new QHBoxLayout();
@@ -1233,9 +1255,9 @@ protected:
 			auto *btn = new QPushButton(preset.name, content);
 			btn->setCursor(Qt::PointingHandCursor);
 			SetQss(btn, QStringLiteral(
-				"QPushButton { background: #161619; color: #cccccc; border: 1px solid #2a2a30; "
-				"border-radius: 8px; padding: 5px 8px; font-size: 11px; }"
-				"QPushButton:hover { background: #26262a; color: #ffffff; }"));
+				"QPushButton { background: #111113; color: #bbbbbb; border: none; "
+				"border-radius: 8px; padding: 6px 8px; font-size: 11px; }"
+				"QPushButton:hover { background: #1c1c1f; color: #ffffff; }"));
 			QObject::connect(btn, &QPushButton::clicked, content, [=, this] {
 				_player->setEqGains(preset.gainsDb);
 				if (!_player->eqEnabled()) {
@@ -1669,6 +1691,7 @@ public:
 	std::function<void(const QModelIndex&, const QPoint&)> playlistMenuRequested;
 	std::function<void(const QModelIndex&)> downloadRequested;
 	bool playlistRemoveMode = false;
+	bool showButtons = true;
 
 	QSize sizeHint(
 			const QStyleOptionViewItem &option,
@@ -1755,26 +1778,28 @@ public:
 				isHov ? kText : fg);
 		};
 
-		if (playlistRemoveMode) {
-			paintBtn(button, Glyph::Trash, kTextMuted);
-		} else {
-			const auto inLibrary = _player->isInLibrary(track.id);
-			paintBtn(button, inLibrary ? Glyph::Check : Glyph::Plus, inLibrary ? kText : kTextMuted);
+		if (showButtons) {
+			if (playlistRemoveMode) {
+				paintBtn(button, Glyph::Trash, kTextMuted);
+			} else {
+				const auto inLibrary = _player->isInLibrary(track.id);
+				paintBtn(button, inLibrary ? Glyph::Check : Glyph::Plus, inLibrary ? kText : kTextMuted);
+			}
+			paintBtn(plButton, Glyph::PlaylistAdd, kTextMuted);
+			const auto cached = _player->isTrackCached(track.id);
+			const auto downloading = _player->isTrackDownloading(track.id);
+			paintBtn(
+				dlButton,
+				cached ? Glyph::Check : Glyph::Download,
+				cached ? QColor(0x5b, 0xe4, 0x84) : (downloading ? kText : kTextMuted));
 		}
-		paintBtn(plButton, Glyph::PlaylistAdd, kTextMuted);
-		const auto cached = _player->isTrackCached(track.id);
-		const auto downloading = _player->isTrackDownloading(track.id);
-		paintBtn(
-			dlButton,
-			cached ? Glyph::Check : Glyph::Download,
-			cached ? QColor(0x5b, 0xe4, 0x84) : (downloading ? kText : kTextMuted));
 
 		auto timeFont = option.font;
 		timeFont.setPixelSize(12);
 		const auto timeWidth = QFontMetrics(timeFont).horizontalAdvance(
 			QStringLiteral("00:00:00"));
 		const auto time = QRect(
-			dlButton.left() - 8 - timeWidth,
+			(showButtons ? dlButton.left() - 8 : rect.right() - 14) - timeWidth,
 			rect.top(),
 			timeWidth,
 			rect.height());
@@ -1856,6 +1881,12 @@ public:
 			return false;
 		}
 		const auto pt = mouse->position().toPoint();
+		if (!showButtons) {
+			if (activated) {
+				activated(index);
+			}
+			return true;
+		}
 		if (buttonRect(option.rect).contains(pt)) {
 			if (libraryToggled) {
 				libraryToggled(index);
@@ -1874,6 +1905,12 @@ public:
 			activated(index);
 		}
 		return true;
+	}
+
+	[[nodiscard]] static bool InButtons(const QRect &row, const QPoint &pt) {
+		return buttonRect(row).contains(pt)
+			|| playlistButtonRect(row).contains(pt)
+			|| downloadButtonRect(row).contains(pt);
 	}
 
 private:
@@ -1895,6 +1932,281 @@ private:
 	SoundCloudClient * const _client;
 	QListView * const _view;
 	mutable QHash<QString, QPixmap> _artCache;
+
+};
+
+class ListDragFilter final : public QObject {
+public:
+	ListDragFilter(
+		QListView *list,
+		Fn<bool()> canDrag,
+		Fn<void(int, int)> onDrop,
+		bool anywhere = false)
+	: QObject(list)
+	, _list(list)
+	, _canDrag(std::move(canDrag))
+	, _onDrop(std::move(onDrop))
+	, _anywhere(anywhere) {
+		_line = new QWidget(list->viewport());
+		_line->setAttribute(Qt::WA_TransparentForMouseEvents);
+		_line->setFixedHeight(2);
+		SetQss(_line, QStringLiteral("background: #ffffff; border: none;"));
+		_line->hide();
+	}
+
+	bool eventFilter(QObject *obj, QEvent *e) override {
+		if (obj != _list->viewport()) {
+			return false;
+		}
+		switch (e->type()) {
+		case QEvent::MouseButtonPress: {
+			const auto m = static_cast<QMouseEvent*>(e);
+			reset();
+			if (m->button() != Qt::LeftButton || !_canDrag()) {
+				return false;
+			}
+			const auto pt = m->position().toPoint();
+			const auto index = _list->indexAt(pt);
+			if (!index.isValid()
+				|| (!_anywhere && TrackDelegate::InButtons(_list->visualRect(index), pt))) {
+				return false;
+			}
+			_row = index.row();
+			_start = pt;
+			return false;
+		}
+		case QEvent::MouseMove: {
+			if (_row < 0) {
+				return false;
+			}
+			const auto pt = static_cast<QMouseEvent*>(e)->position().toPoint();
+			if (!_dragging) {
+				if ((pt - _start).manhattanLength() < QApplication::startDragDistance()) {
+					return false;
+				}
+				_dragging = true;
+				_list->viewport()->setCursor(Qt::ClosedHandCursor);
+			}
+			updateDrop(pt);
+			return true;
+		}
+		case QEvent::MouseButtonRelease: {
+			if (_row >= 0 && _dragging) {
+				const auto row = _row;
+				const auto drop = _drop;
+				reset();
+				if (drop >= 0) {
+					_onDrop(row, drop);
+				}
+				return true;
+			}
+			reset();
+			return false;
+		}
+		default:
+			return false;
+		}
+	}
+
+private:
+	void updateDrop(const QPoint &pt) {
+		const auto count = _list->model()->rowCount();
+		if (count <= 0) {
+			return;
+		}
+		auto y = 0;
+		const auto index = _list->indexAt(pt);
+		if (index.isValid()) {
+			const auto rect = _list->visualRect(index);
+			const auto after = (pt.y() > rect.center().y());
+			_drop = index.row() + (after ? 1 : 0);
+			y = after ? rect.bottom() : rect.top();
+		} else if (pt.y() < _list->viewport()->height() / 2) {
+			_drop = 0;
+			y = _list->visualRect(_list->model()->index(0, 0)).top();
+		} else {
+			_drop = count;
+			y = _list->visualRect(_list->model()->index(count - 1, 0)).bottom();
+		}
+		_line->setGeometry(8, y - 1, _list->viewport()->width() - 16, 2);
+		_line->show();
+		_line->raise();
+	}
+
+	void reset() {
+		_row = -1;
+		_drop = -1;
+		_dragging = false;
+		_line->hide();
+		_list->viewport()->unsetCursor();
+	}
+
+	QListView * const _list;
+	Fn<bool()> _canDrag;
+	Fn<void(int, int)> _onDrop;
+	bool _anywhere = false;
+	QWidget *_line = nullptr;
+	QPoint _start;
+	int _row = -1;
+	int _drop = -1;
+	bool _dragging = false;
+
+};
+
+class QueueBox final : public Ui::BoxContent {
+public:
+	QueueBox(QWidget*, Player *player)
+	: _player(player) {
+	}
+
+protected:
+	void prepare() override {
+		setTitle(rpl::single(u"Очередь"_q));
+		const auto content = Ui::CreateChild<QWidget>(this);
+		SetQss(content, QStringLiteral("background: #000000; border: none;"));
+		const auto root = new QVBoxLayout(content);
+		root->setContentsMargins(0, 0, 0, 0);
+		root->setSpacing(0);
+
+		const auto nowCaption = new QLabel(QString::fromUtf8("СЕЙЧАС ИГРАЕТ"), content);
+		SetQss(nowCaption, QStringLiteral(
+			"color: #8a8a8a; font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+			"padding: 6px 20px 0 20px; border: none; background: transparent;"));
+		root->addWidget(nowCaption);
+		const auto now = new QLabel(content);
+		now->setWordWrap(false);
+		SetQss(now, QStringLiteral(
+			"color: #ffffff; font-size: 15px; font-weight: 600; padding: 4px 20px 12px 20px; "
+			"border: none; background: transparent;"));
+		root->addWidget(now);
+
+		const auto nextCaption = new QLabel(QString::fromUtf8("ДАЛЬШЕ"), content);
+		SetQss(nextCaption, QStringLiteral(
+			"color: #8a8a8a; font-size: 10px; font-weight: 700; letter-spacing: 1px; "
+			"padding: 4px 20px 6px 20px; border: none; background: transparent;"));
+		root->addWidget(nextCaption);
+
+		const auto player = _player;
+		const auto list = new QListView(content);
+		const auto model = new TrackListModel(list);
+		list->setModel(model);
+		list->setMouseTracking(true);
+		list->viewport()->setAttribute(Qt::WA_Hover);
+		list->setSelectionMode(QAbstractItemView::NoSelection);
+		list->setEditTriggers(QAbstractItemView::NoEditTriggers);
+		list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+		list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+		list->setUniformItemSizes(true);
+		list->setFocusPolicy(Qt::NoFocus);
+		list->setFrameShape(QFrame::NoFrame);
+		list->setContextMenuPolicy(Qt::CustomContextMenu);
+		SetQss(list, QStringLiteral(
+			"QListView { background: transparent; border: none; outline: none; }"
+			"QScrollBar:vertical { background: transparent; width: 8px; margin: 4px 2px 4px 0; }"
+			"QScrollBar::handle:vertical { background: #2e2e34; border-radius: 3px; min-height: 36px; }"
+			"QScrollBar::handle:vertical:hover { background: #46464e; }"
+			"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; border: none; background: none; }"
+			"QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: transparent; }"));
+		root->addWidget(list, 1);
+
+		const auto delegate = new TrackDelegate(player, SharedClient(), list);
+		delegate->showButtons = false;
+		list->setItemDelegate(delegate);
+
+		const auto empty = new QLabel(
+			QString::fromUtf8("Очередь пуста.\nДобавьте трек через правую кнопку мыши → «Играть следующим»."),
+			content);
+		empty->setWordWrap(true);
+		empty->setAlignment(Qt::AlignCenter);
+		SetQss(empty, QStringLiteral(
+			"color: #8a8a8a; font-size: 12px; padding: 36px 24px; border: none; background: transparent;"));
+		root->addWidget(empty);
+
+		const auto hint = new QLabel(
+			QString::fromUtf8("Нажмите на трек, чтобы запустить. Тащите мышью, чтобы поменять порядок. Правая кнопка мыши убирает трек из очереди."),
+			content);
+		hint->setWordWrap(true);
+		SetQss(hint, QStringLiteral(
+			"color: #6a6a70; font-size: 11px; padding: 8px 20px 6px 20px; border: none; background: transparent;"));
+		root->addWidget(hint);
+
+		const auto refresh = [=] {
+			const auto current = player->currentTrack();
+			now->setText(current.valid()
+				? QFontMetrics(now->font()).elidedText(
+					current.title + (current.artist.isEmpty()
+						? QString()
+						: QString::fromUtf8(" — ") + current.artist),
+					Qt::ElideRight,
+					440)
+				: QString::fromUtf8("Ничего не играет"));
+			const auto tracks = player->upcoming();
+			model->setTracks(tracks);
+			list->setVisible(!tracks.isEmpty());
+			empty->setVisible(tracks.isEmpty());
+		};
+		const auto later = [=] {
+			QTimer::singleShot(0, content, refresh);
+		};
+		refresh();
+
+		QObject::connect(player, &Player::queueChanged, content, later);
+		QObject::connect(player, &Player::currentTrackChanged, content, later);
+		QObject::connect(SharedClient(), &SoundCloudClient::artworkLoaded, content, [=] {
+			list->viewport()->update();
+		});
+
+		delegate->activated = [=](const QModelIndex &index) {
+			player->playUpcoming(index.row());
+		};
+		const auto menuHolder = std::make_shared<QPointer<Ui::PopupMenu>>();
+		const auto showMenu = [=](int row, const QPoint &globalPos) {
+			if (row < 0 || row >= model->rowCount()) {
+				return;
+			}
+			if (const auto old = menuHolder->data()) {
+				delete old;
+			}
+			*menuHolder = new Ui::PopupMenu(list, st::popupMenuWithIcons);
+			(*menuHolder)->addAction(QString::fromUtf8("Убрать из очереди"), [=] {
+				player->removeUpcoming(row);
+			});
+			(*menuHolder)->popup(globalPos);
+		};
+		QObject::connect(list, &QWidget::customContextMenuRequested, content, [=](const QPoint &pt) {
+			const auto index = list->indexAt(pt);
+			if (index.isValid()) {
+				showMenu(index.row(), list->viewport()->mapToGlobal(pt));
+			}
+		});
+		list->viewport()->installEventFilter(new ListDragFilter(
+			list,
+			[] { return true; },
+			[=](int from, int drop) {
+				const auto count = model->rowCount();
+				if (from < 0 || from >= count || drop == from || drop == from + 1) {
+					return;
+				}
+				player->moveUpcoming(from, (drop > from) ? (drop - 1) : drop);
+			},
+			true));
+
+		_content = content;
+		content->resize(500, 580);
+		setDimensions(500, 580);
+		addButton(rpl::single(u"Готово"_q), [=] { closeBox(); });
+	}
+
+	void resizeEvent(QResizeEvent *e) override {
+		BoxContent::resizeEvent(e);
+		if (_content) {
+			_content->setGeometry(0, 0, width(), height());
+		}
+	}
+
+private:
+	Player * const _player;
+	QWidget *_content = nullptr;
 
 };
 
@@ -1952,6 +2264,9 @@ VRGMiniPlayerBar::VRGMiniPlayerBar(
 	_volumePct->setObjectName(QStringLiteral("vrgTime"));
 	_volumePct->setFixedWidth(36);
 
+	_queueBtn = makeTool(QStringLiteral("vrgCtrl"), 30, 17);
+	_queueBtn->setIcon(GlyphIcon(Glyph::Queue, QColor(0x8a, 0x8a, 0x8a), 17));
+	_queueBtn->setToolTip(QStringLiteral("Очередь"));
 	_addPlaylistBtn = makeTool(QStringLiteral("vrgCtrl"), 30, 17);
 	_addPlaylistBtn->setIcon(GlyphIcon(Glyph::Plus, QColor(0x8a, 0x8a, 0x8a), 17));
 	_addPlaylistBtn->setToolTip(QStringLiteral("Добавить в плейлист"));
@@ -1994,6 +2309,7 @@ VRGMiniPlayerBar::VRGMiniPlayerBar(
 	rightLay->addStretch(1);
 	rightLay->addWidget(_lyricsBtn);
 	rightLay->addWidget(_eqBtn);
+	rightLay->addWidget(_queueBtn);
 	rightLay->addSpacing(4);
 	rightLay->addWidget(_volumeIcon);
 	rightLay->addWidget(_volume);
@@ -2041,6 +2357,7 @@ VRGMiniPlayerBar::VRGMiniPlayerBar(
 	});
 	connect(_lyricsBtn, &QToolButton::clicked, this, &VRGMiniPlayerBar::lyricsToggled);
 	connect(_eqBtn, &QToolButton::clicked, this, &VRGMiniPlayerBar::eqRequested);
+	connect(_queueBtn, &QToolButton::clicked, this, &VRGMiniPlayerBar::queueRequested);
 	connect(_addPlaylistBtn, &QToolButton::clicked, this, [this] {
 		const auto t = _player->currentTrack();
 		if (t.valid()) {
@@ -2487,7 +2804,7 @@ void VRGMusicWidget::setupUi() {
 		}
 		const auto track = currentModel()->track(index.row());
 		if (track.valid()) {
-			showPlaylistMenuForTrack(track, _list->viewport()->mapToGlobal(pt));
+			showPlaylistMenuForTrack(track, _list->viewport()->mapToGlobal(pt), true);
 		}
 	});
 
@@ -2510,6 +2827,25 @@ void VRGMusicWidget::setupUi() {
 		toggleDownload(index);
 	};
 	_list->setItemDelegate(_delegate);
+	_list->viewport()->installEventFilter(new ListDragFilter(
+		_list,
+		[this] {
+			const auto reorderable = (_tab == Tab::Library)
+				|| (_tab == Tab::Playlists && !_activePlaylistId.isEmpty());
+			return reorderable && _search->text().trimmed().isEmpty();
+		},
+		[this](int from, int drop) {
+			const auto model = currentModel();
+			const auto count = model ? model->rowCount() : 0;
+			if (!model || from < 0 || from >= count || drop == from || drop == from + 1) {
+				return;
+			}
+			const auto moved = model->track(from);
+			const auto anchor = (drop < count)
+				? model->track(drop)
+				: model->track(count - 1);
+			_player->reorderTrack(_activePlaylistId, moved.id, anchor.id, drop >= count);
+		}));
 
 	_status = new QLabel(this);
 	_status->setObjectName(QStringLiteral("vrgStatus"));
@@ -2653,7 +2989,10 @@ void VRGMusicWidget::setupUi() {
 	});
 	connect(_bar, &VRGMiniPlayerBar::lyricsToggled, this, &VRGMusicWidget::toggleLyricsPanel);
 	connect(_bar, &VRGMiniPlayerBar::eqRequested, this, &VRGMusicWidget::showEqBox);
-	connect(_bar, &VRGMiniPlayerBar::playlistRequested, this, &VRGMusicWidget::showPlaylistMenuForTrack);
+	connect(_bar, &VRGMiniPlayerBar::queueRequested, this, &VRGMusicWidget::showQueueBox);
+	connect(_bar, &VRGMiniPlayerBar::playlistRequested, this, [this](TrackInfo track, QPoint globalPos) {
+		showPlaylistMenuForTrack(track, globalPos, false);
+	});
 }
 
 void VRGMusicWidget::setTab(Tab tab) {
@@ -2936,12 +3275,27 @@ void VRGMusicWidget::createPlaylistPrompt(std::optional<TrackInfo> autoAddTrack)
 
 void VRGMusicWidget::showPlaylistMenuForTrack(
 		const TrackInfo &track,
-		const QPoint &globalPos) {
-	if (_popupMenu) {
-		delete _popupMenu;
-		_popupMenu = nullptr;
+		const QPoint &globalPos,
+		bool withQueue) {
+	if (const auto old = _popupMenu.data()) {
+		delete old;
 	}
 	_popupMenu = new Ui::PopupMenu(this, st::popupMenuWithIcons);
+	if (withQueue) {
+		_popupMenu->addAction(QString::fromUtf8("Играть следующим"), [this, track] {
+			_player->enqueueNext(track);
+			if (_controller) {
+				_controller->showToast(QString::fromUtf8("Добавлено: играть следующим"));
+			}
+		});
+		_popupMenu->addAction(QString::fromUtf8("В конец очереди"), [this, track] {
+			_player->enqueueLast(track);
+			if (_controller) {
+				_controller->showToast(QString::fromUtf8("Добавлено в конец очереди"));
+			}
+		});
+		_popupMenu->addSeparator();
+	}
 	_popupMenu->addAction(QStringLiteral("Отправить в чат…"), [this, track] {
 		sendTrackToChat(track);
 	});
@@ -3175,6 +3529,12 @@ void VRGMusicWidget::toggleLyricsPanel() {
 void VRGMusicWidget::updateLyricsDisplay(qint64 positionMs) {
 	if (_lyricsOpen && _lyricsView) {
 		_lyricsView->setPosition(positionMs);
+	}
+}
+
+void VRGMusicWidget::showQueueBox() {
+	if (_controller) {
+		_controller->show(Box<QueueBox>(_player));
 	}
 }
 
@@ -3594,6 +3954,9 @@ void VRGMusicWidget::playFromList(const QModelIndex &index) {
 	}
 	if (_player->currentTrack().id == track.id
 		&& _player->state() != PlaybackState::Stopped) {
+		if (_player->upcoming().isEmpty()) {
+			_player->adoptQueueKeepPlaying(model->tracks());
+		}
 		_player->togglePlayPause();
 		return;
 	}

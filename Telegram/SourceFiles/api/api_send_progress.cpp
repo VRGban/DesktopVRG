@@ -111,7 +111,7 @@ bool SendProgressManager::updated(const Key &key, bool doing) {
 
 void SendProgressManager::send(const Key &key, int progress) {
 	if (Vrg::Ghost::Typing()) {
-		return; // VRG ghost mode: hide "typing..." and other actions
+		return;
 	}
 	if (skipRequest(key)) {
 		return;

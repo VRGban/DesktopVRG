@@ -6,6 +6,7 @@ For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "history/history_unread_things.h"
+#include "vrg/vrg_ghost_mentions.h"
 
 #include "data/data_saved_sublist.h"
 #include "data/data_session.h"
@@ -219,7 +220,11 @@ void Proxy::addSlice(const MTPmessages_Messages &slice, int alreadyLoaded) {
 			}
 			Unexpected("Type in Proxy::addSlice.");
 		}();
-		if (is) {
+		const auto hidden = (_type == Type::Mentions)
+			&& Vrg::GhostMentions::Contains(
+				history->peer->id.value,
+				item->id.bare);
+		if (is && !hidden) {
 			if (!_data) {
 				createData();
 			}
@@ -229,6 +234,15 @@ void Proxy::addSlice(const MTPmessages_Messages &slice, int alreadyLoaded) {
 	}
 	if (!added) {
 		fullCount = _data ? resolveList().loadedCount() : 0;
+	}
+	if (_type == Type::Mentions && fullCount > 0) {
+		const auto topic = _thread->asTopic();
+		fullCount = std::max(
+			Vrg::GhostMentions::Adjusted(
+				history->peer->id.value,
+				topic ? topic->rootId().bare : 0,
+				fullCount),
+			_data ? resolveList().loadedCount() : 0);
 	}
 	setCount(fullCount);
 	if (weak) {

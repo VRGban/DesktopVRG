@@ -10,6 +10,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "history/history.h"
 #include "vrg/vrg_autoreply.h"
 #include "vrg/vrg_ghost.h"
+#include "vrg/vrg_ghost_mentions.h"
 #include "vrg/vrg_pins.h"
 
 #include "history/view/history_view_element.h"
@@ -3552,6 +3553,25 @@ void History::applyDialog(
 	setUnreadMark(data.is_unread_mark());
 	unreadMentions().setCount(data.vunread_mentions_count().v);
 	unreadReactions().setCount(data.vunread_reactions_count().v);
+	{
+		const auto serverMentions = data.vunread_mentions_count().v;
+		const auto adjusted = Vrg::GhostMentions::Adjusted(
+			peer->id.value,
+			0,
+			serverMentions);
+		if (adjusted != serverMentions) {
+			unreadMentions().setCount(adjusted);
+		}
+	}
+	if (Vrg::Conf::Bool("auto_read_reactions", true)) {
+		const auto topId = int64(data.vtop_message().v);
+		if (topId > 0
+			&& Vrg::Ghost::ShouldBlockRead(peer->id.value)
+			&& Vrg::Ghost::LocalReadTill(peer->id.value) >= topId) {
+			unreadMentions().clear();
+			unreadReactions().clear();
+		}
+	}
 	const auto pollVotesCount = data.vunread_poll_votes_count().v;
 	setUnreadPollVotesCount(pollVotesCount);
 	unreadPollVotes().setCount(pollVotesCount);

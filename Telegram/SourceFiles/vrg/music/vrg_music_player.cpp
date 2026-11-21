@@ -410,6 +410,22 @@ void Player::setQueue(const QVector<TrackInfo> &tracks, int startIndex) {
 	}
 }
 
+void Player::adoptQueueKeepPlaying(const QVector<TrackInfo> &tracks) {
+	if (_index < 0 || _index >= _queue.size()) {
+		return;
+	}
+	const auto current = _queue[_index];
+	const auto position = int(tracks.indexOf(current));
+	if (position < 0) {
+		return;
+	}
+	_queue = tracks;
+	_index = position;
+	rebuildOrder();
+	Q_EMIT queueChanged();
+	scheduleSaveState();
+}
+
 void Player::playTrack(const TrackInfo &track) {
 	if (!track.valid()) {
 		return;
@@ -428,6 +444,125 @@ void Player::playTrack(const TrackInfo &track) {
 	}
 	_failuresInRow = 0;
 	startIndex(index);
+}
+
+void Player::enqueueNext(const TrackInfo &track) {
+	if (!track.valid()) {
+		return;
+	}
+	if (_queue.isEmpty() || _index < 0) {
+		setQueue({ track }, 0);
+		return;
+	}
+	const auto index = int(_queue.size());
+	_queue.push_back(track);
+	const auto at = std::min(
+		orderPosition() + 1 + _manualAhead,
+		int(_order.size()));
+	_order.insert(at, index);
+	++_manualAhead;
+	Q_EMIT queueChanged();
+	scheduleSaveState();
+}
+
+void Player::enqueueLast(const TrackInfo &track) {
+	if (!track.valid()) {
+		return;
+	}
+	if (_queue.isEmpty() || _index < 0) {
+		setQueue({ track }, 0);
+		return;
+	}
+	_order.push_back(int(_queue.size()));
+	_queue.push_back(track);
+	Q_EMIT queueChanged();
+	scheduleSaveState();
+}
+
+QVector<TrackInfo> Player::upcoming() const {
+	auto result = QVector<TrackInfo>();
+	if (_index < 0) {
+		return result;
+	}
+	for (auto i = orderPosition() + 1; i < _order.size(); ++i) {
+		result.push_back(_queue[_order[i]]);
+	}
+	return result;
+}
+
+int Player::manualAhead() const {
+	return _manualAhead;
+}
+
+void Player::removeQueueIndex(int queueIndex) {
+	if (queueIndex < 0 || queueIndex >= _queue.size()) {
+		return;
+	}
+	_order.removeAll(queueIndex);
+	for (auto &value : _order) {
+		if (value > queueIndex) {
+			--value;
+		}
+	}
+	_queue.remove(queueIndex);
+	if (_index > queueIndex) {
+		--_index;
+	}
+}
+
+void Player::removeUpcoming(int index) {
+	const auto at = orderPosition() + 1 + index;
+	if (index < 0 || at >= _order.size()) {
+		return;
+	}
+	if (index < _manualAhead) {
+		--_manualAhead;
+	}
+	removeQueueIndex(_order[at]);
+	Q_EMIT queueChanged();
+	scheduleSaveState();
+}
+
+void Player::moveUpcoming(int from, int to) {
+	const auto base = orderPosition() + 1;
+	const auto count = int(_order.size()) - base;
+	if (from < 0 || to < 0 || from >= count || to >= count || from == to) {
+		return;
+	}
+	_order.move(base + from, base + to);
+	_manualAhead = std::min(_manualAhead, count);
+	Q_EMIT queueChanged();
+	scheduleSaveState();
+}
+
+void Player::clearUpcoming() {
+	if (_index < 0) {
+		return;
+	}
+	auto indices = QVector<int>();
+	for (auto i = orderPosition() + 1; i < _order.size(); ++i) {
+		indices.push_back(_order[i]);
+	}
+	if (indices.isEmpty()) {
+		return;
+	}
+	std::sort(indices.begin(), indices.end(), std::greater<int>());
+	for (const auto queueIndex : indices) {
+		removeQueueIndex(queueIndex);
+	}
+	_manualAhead = 0;
+	Q_EMIT queueChanged();
+	scheduleSaveState();
+}
+
+void Player::playUpcoming(int index) {
+	const auto at = orderPosition() + 1 + index;
+	if (index < 0 || at >= _order.size()) {
+		return;
+	}
+	_manualAhead = (index < _manualAhead) ? (_manualAhead - index - 1) : 0;
+	_failuresInRow = 0;
+	startIndex(_order[at]);
 }
 
 void Player::togglePlayPause() {
@@ -495,6 +630,7 @@ void Player::prev() {
 	const auto position = orderPosition();
 	if (position > 0) {
 		_failuresInRow = 0;
+		_manualAhead = 0;
 		startIndex(_order[position - 1]);
 	} else if (_repeat == RepeatMode::All && _order.size() > 1) {
 		_failuresInRow = 0;
@@ -826,6 +962,9 @@ void Player::advance(bool userAction) {
 	}
 	const auto position = orderPosition();
 	if (position + 1 < _order.size()) {
+		if (_manualAhead > 0) {
+			--_manualAhead;
+		}
 		startIndex(_order[position + 1]);
 		return;
 	}
@@ -868,6 +1007,7 @@ void Player::advance(bool userAction) {
 }
 
 void Player::rebuildOrder() {
+	_manualAhead = 0;
 	_order.resize(_queue.size());
 	std::iota(_order.begin(), _order.end(), 0);
 	if (!_shuffle || _order.size() < 2) {
@@ -1184,6 +1324,60 @@ void Player::moveTrackInPlaylist(
 		saveLibrary();
 		Q_EMIT playlistsChanged();
 		return;
+	}
+}
+
+void Player::reorderTrack(
+		const QString &playlistId,
+		const QString &movedId,
+		const QString &anchorId,
+		bool after) {
+	if (movedId == anchorId) {
+		return;
+	}
+	auto *list = static_cast<QVector<TrackInfo>*>(nullptr);
+	if (playlistId.isEmpty()) {
+		list = &_library;
+	} else {
+		for (auto &pl : _playlists) {
+			if (pl.id == playlistId) {
+				list = &pl.tracks;
+				break;
+			}
+		}
+	}
+	if (!list) {
+		return;
+	}
+	auto from = -1;
+	for (auto i = 0; i != list->size(); ++i) {
+		if ((*list)[i].id == movedId) {
+			from = i;
+			break;
+		}
+	}
+	if (from < 0) {
+		return;
+	}
+	const auto moved = (*list)[from];
+	list->remove(from);
+	auto to = -1;
+	for (auto i = 0; i != list->size(); ++i) {
+		if ((*list)[i].id == anchorId) {
+			to = i;
+			break;
+		}
+	}
+	if (to < 0) {
+		list->insert(from, moved);
+		return;
+	}
+	list->insert(to + (after ? 1 : 0), moved);
+	saveLibrary();
+	if (playlistId.isEmpty()) {
+		Q_EMIT libraryChanged();
+	} else {
+		Q_EMIT playlistsChanged();
 	}
 }
 

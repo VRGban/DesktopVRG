@@ -40,11 +40,20 @@ public:
 
 	void setQueue(const QVector<TrackInfo> &tracks, int startIndex);
 	void playTrack(const TrackInfo &track);
+	void adoptQueueKeepPlaying(const QVector<TrackInfo> &tracks);
 	void togglePlayPause();
 	void setVoiceActive(bool active);
 	void stop();
 	void next();
 	void prev();
+	void enqueueNext(const TrackInfo &track);
+	void enqueueLast(const TrackInfo &track);
+	[[nodiscard]] QVector<TrackInfo> upcoming() const;
+	[[nodiscard]] int manualAhead() const;
+	void removeUpcoming(int index);
+	void moveUpcoming(int from, int to);
+	void clearUpcoming();
+	void playUpcoming(int index);
 	void seek(qint64 positionMs);
 	void setVolume(float volume);
 	void setBoost(float boost);
@@ -89,6 +98,7 @@ public:
 	void removeTrackFromPlaylist(const QString &playlistId, const QString &trackId);
 	void addTrackToPlaylistAtEnd(const QString &playlistId, const TrackInfo &track);
 	void moveTrackInPlaylist(const QString &playlistId, const QString &trackId, int delta);
+	void reorderTrack(const QString &playlistId, const QString &movedId, const QString &anchorId, bool after);
 
 	[[nodiscard]] static QString CacheDir();
 	[[nodiscard]] static QString CachedTrackPath(const QString &trackId);
@@ -184,6 +194,8 @@ private:
 	QVector<TrackInfo> _queue;
 	int _index = -1;
 	QVector<int> _order;
+	int _manualAhead = 0;
+	void removeQueueIndex(int queueIndex);
 
 	QVector<TrackInfo> _library;
 	QVector<Playlist> _playlists;

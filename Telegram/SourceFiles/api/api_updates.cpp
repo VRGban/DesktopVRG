@@ -1631,8 +1631,6 @@ void Updates::applyUpdates(
 			if (const auto item = lookupMessage()) {
 				_session->data().fillMessagePeers(item->fullId(), d);
 				item->applySentMessage(sent.text, d, wasAlready);
-				// VRG: the short answer has no full message, so fetch it
-				// once to keep a local copy (kept if deleted for everyone).
 				const auto session = _session;
 				session->api().request(MTPmessages_GetMessages(
 					MTP_vector<MTPInputMessage>(

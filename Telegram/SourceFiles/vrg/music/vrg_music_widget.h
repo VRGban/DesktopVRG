@@ -50,6 +50,7 @@ public:
 Q_SIGNALS:
 	void lyricsToggled();
 	void eqRequested();
+	void queueRequested();
 	void playlistRequested(TrackInfo track, QPoint globalPos);
 
 protected:
@@ -80,6 +81,7 @@ private:
 	QToolButton *_repeat = nullptr;
 	QToolButton *_lyricsBtn = nullptr;
 	QToolButton *_eqBtn = nullptr;
+	QToolButton *_queueBtn = nullptr;
 	QLabel *_volumeIcon = nullptr;
 	SmoothSlider *_volume = nullptr;
 	QLabel *_volumePct = nullptr;
@@ -136,10 +138,11 @@ private:
 	void openPlaylist(const QString &playlistId);
 	void closePlaylist();
 	void createPlaylistPrompt(std::optional<TrackInfo> autoAddTrack = std::nullopt);
-	void showPlaylistMenuForTrack(const TrackInfo &track, const QPoint &globalPos);
+	void showPlaylistMenuForTrack(const TrackInfo &track, const QPoint &globalPos, bool withQueue = false);
 	void sendTrackToChat(const TrackInfo &track);
 	void toggleLyricsPanel();
 	void showEqBox();
+	void showQueueBox();
 	void updateLyricsDisplay(qint64 positionMs);
 	void showError(const QString &message);
 	void showImportBox(const QString &playlistId);
@@ -194,7 +197,7 @@ private:
 	bool _lyricsOpen = false;
 
 	VRGMiniPlayerBar *_bar = nullptr;
-	Ui::PopupMenu *_popupMenu = nullptr;
+	QPointer<Ui::PopupMenu> _popupMenu;
 
 	Tab _tab = Tab::Search;
 	QString _activePlaylistId;

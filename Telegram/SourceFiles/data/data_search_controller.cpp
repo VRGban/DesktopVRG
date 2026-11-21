@@ -290,8 +290,6 @@ SearchResult ParseSearchResult(
 		}();
 	}
 	if (type == Storage::SharedMediaType::kCount) {
-		// VRG: a short page that reaches the newest end means that
-		// everything newer is loaded, so deleted messages there belong too.
 		const auto newer = ranges::count_if(
 			result.messageIds,
 			[&](MsgId id) { return id > messageId; });
@@ -307,7 +305,6 @@ SearchResult ParseSearchResult(
 		if (reachedNewest || beforeNewest) {
 			result.noSkipRange.till = ServerMaxMsgId;
 		}
-		// VRG: messages deleted on the server come back from the local copy.
 		const auto extra = Vrg::Store::Extra(
 			peer,
 			int64(result.noSkipRange.from.bare),
