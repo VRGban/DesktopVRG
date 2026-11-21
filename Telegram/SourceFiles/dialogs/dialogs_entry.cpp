@@ -348,7 +348,8 @@ DateText ResolveDateText(
 	static int LastTodaySerial = 0;
 	if (!now || LastNow != now) {
 		LastNow = now;
-		LastTodaySerial = int(QDate::currentDate().toJulianDay());
+		LastTodaySerial = int(base::unixtime::parse(base::unixtime::now()).date().toJulianDay())
+			+ int(base::unixtime::display_shift() / 1800) * 10000000;
 	}
 	if (cache.messageTimeId != date
 		|| cache.todaySerial != LastTodaySerial) {

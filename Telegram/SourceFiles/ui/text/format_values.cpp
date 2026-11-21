@@ -80,7 +80,7 @@ QString FormatProgressText(qint64 ready, qint64 total) {
 }
 
 QString FormatDateTime(QDateTime date) {
-	const auto now = QDateTime::currentDateTime();
+	const auto now = base::unixtime::parse(base::unixtime::now());
 	if (date.date() == now.date()) {
 		return tr::lng_mediaview_today(
 			tr::now,
@@ -102,7 +102,7 @@ QString FormatDateTime(QDateTime date) {
 }
 
 QString FormatDateTimeSavedFrom(QDateTime dateTime) {
-	const auto current = QDate::currentDate();
+	const auto current = base::unixtime::parse(base::unixtime::now()).date();
 	const auto date = dateTime.date();
 	const auto timeStr = QLocale().toString(
 		dateTime.time(),
@@ -725,7 +725,7 @@ QString FormatDialogsDate(const QDateTime &lastTime) {
 	// Show all dates that are in the last 20 hours in time format.
 	constexpr int kRecentlyInSeconds = 20 * 3600;
 
-	const auto now = QDateTime::currentDateTime();
+	const auto now = base::unixtime::parse(base::unixtime::now());
 	const auto nowDate = now.date();
 	const auto lastDate = lastTime.date();
 

@@ -6,6 +6,7 @@
 //
 #include "base/unixtime.h"
 
+#include <atomic>
 #include <QDateTime>
 #include <QReadWriteLock>
 
@@ -22,6 +23,7 @@ namespace unixtime {
 namespace {
 
 constexpr auto kIgnoreTimeDifference = TimeId(3);
+std::atomic<TimeId> DisplayShift{0};
 
 std::atomic<bool> ValueUpdated/* = false*/;
 std::atomic<TimeId> ValueShift/* = 0*/;
@@ -172,14 +174,24 @@ rpl::producer<> updates() {
 	return UpdatesStream().events();
 }
 
+void set_display_shift(TimeId seconds) {
+	DisplayShift = seconds;
+}
+
+TimeId display_shift() {
+	return DisplayShift.load();
+}
+
 QDateTime parse(TimeId value) {
 	return (value > 0)
-		? QDateTime::fromSecsSinceEpoch(value - ValueShift)
+		? QDateTime::fromSecsSinceEpoch(value - ValueShift).addSecs(DisplayShift.load())
 		: QDateTime();
 }
 
 TimeId serialize(const QDateTime &date) {
-	return date.isNull() ? TimeId(0) : date.toSecsSinceEpoch() + ValueShift;
+	return date.isNull()
+		? TimeId(0)
+		: date.addSecs(-DisplayShift.load()).toSecsSinceEpoch() + ValueShift;
 }
 
 bool http_valid() {

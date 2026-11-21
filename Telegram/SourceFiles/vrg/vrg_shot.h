@@ -35,8 +35,9 @@ public:
 			auto buffer = QBuffer(&bytes);
 			buffer.open(QIODevice::WriteOnly);
 			image.save(&buffer, "PNG", 90);
-			crl::on_main([bytes = std::move(bytes)]() mutable {
+			crl::on_main([image, bytes = std::move(bytes)]() mutable {
 				const auto data = new QMimeData();
+				data->setImageData(image);
 				data->setData(u"image/png"_q, std::move(bytes));
 				QGuiApplication::clipboard()->setMimeData(data);
 			});

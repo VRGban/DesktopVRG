@@ -35,6 +35,10 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #include "data/data_user.h"
 #include "vrg/vrg_autoreply.h"
 #include "vrg/vrg_backup.h"
+#include "data/data_session.h"
+#include "main/main_session.h"
+#include "storage/cache/storage_cache_database.h"
+#include "base/unixtime.h"
 #include "vrg/vrg_badges.h"
 #include "vrg/vrg_chat_lock.h"
 #include "vrg/vrg_conf.h"
@@ -76,7 +80,7 @@ namespace Settings {
 
 namespace VrgDetail {
 
-inline constexpr auto kVersion = "1.0.4";
+inline constexpr auto kVersion = "1.0.5";
 
 [[nodiscard]] inline QString Ru(const char *text) {
 	return QString::fromUtf8(text);
@@ -307,6 +311,57 @@ inline void AddConfSlider(
 				onChanged(v);
 			}
 		});
+}
+
+[[nodiscard]] inline QString TimeShiftText(int minutes) {
+	if (!minutes) {
+		return Ru("без сдвига");
+	}
+	const auto sign = (minutes < 0) ? QString::fromUtf8("−") : QString("+");
+	const auto abs = std::abs(minutes);
+	const auto hours = abs / 60;
+	const auto rest = abs % 60;
+	auto result = sign + QString::number(hours) + Ru(" ч");
+	if (rest) {
+		result += QChar(' ') + QString::number(rest) + Ru(" мин");
+	}
+	return result;
+}
+
+inline void ApplyTimeShift() {
+	base::unixtime::set_display_shift(Vrg::Conf::Int("time_shift_min", 0) * 60);
+}
+
+inline void TimeShiftBox(
+		not_null<Ui::GenericBox*> box,
+		Fn<void(QString)> chosen) {
+	box->setTitle(rpl::single(Ru("Время в клиенте")));
+	box->addRow(
+		object_ptr<Ui::FlatLabel>(
+			box,
+			Ru("Сдвигает время на вашем экране: у сообщений, в списке чатов, в датах. "
+				"Другие люди видят настоящее время. Полностью применяется после перезапуска."),
+			st::boxLabel),
+		st::boxRowPadding);
+	const auto current = Vrg::Conf::Int("time_shift_min", 0);
+	const auto group = std::make_shared<Ui::RadiobuttonGroup>(current);
+	for (auto minutes = -720; minutes <= 720; minutes += 30) {
+		box->addRow(
+			object_ptr<Ui::Radiobutton>(
+				box,
+				group,
+				minutes,
+				TimeShiftText(minutes),
+				st::messagePrivacyCheck),
+			st::settingsSendTypePadding);
+	}
+	group->setChangedCallback([=](int value) {
+		Vrg::Conf::SetInt("time_shift_min", value);
+		ApplyTimeShift();
+		chosen(TimeShiftText(value));
+		box->closeBox();
+	});
+	box->addButton(rpl::single(Ru("Закрыть")), [=] { box->closeBox(); });
 }
 
 inline void IconBox(
@@ -624,6 +679,20 @@ public:
 			rpl::never<bool>(),
 			Ru("Убирает задержку десктопных уведомлений, когда параллельно "
 				"активен телефон или другое устройство."));
+		VrgDetail::AddCaption(content, Ru("Время"));
+		const auto shiftLabel = content->lifetime().make_state<
+			rpl::variable<QString>>(VrgDetail::TimeShiftText(
+				Vrg::Conf::Int("time_shift_min", 0)));
+		AddButtonWithLabel(
+			content,
+			rpl::single(Ru("Время в клиенте")),
+			shiftLabel->value(),
+			st::settingsButtonNoIcon
+		)->setClickedCallback([=] {
+			controller->show(Box(VrgDetail::TimeShiftBox, [=](QString text) {
+				*shiftLabel = text;
+			}));
+		});
 		VrgDetail::AddCaption(content, Ru("Автоответчик"));
 		AddButtonWithLabel(
 			content,
@@ -895,6 +964,26 @@ public:
 			rpl::never<bool>(),
 			Ru("Снимает запрет на копирование текста, пересылку и скачивание "
 				"медиа в каналах и закрытых чатах, а также отключает защиту от скриншотов."));
+
+		VrgDetail::AddCaption(content, Ru("Кэш"));
+		AddButtonWithLabel(
+			content,
+			rpl::single(Ru("Очистить кэш")),
+			rpl::single(QString()),
+			st::settingsButtonNoIcon
+		)->setClickedCallback([=] {
+			controller->show(Ui::MakeConfirmBox({
+				.text = Ru("Вы уверены, что хотите очистить кэш?"),
+				.confirmed = [=](Fn<void()> close) {
+					close();
+					auto &data = controller->session().data();
+					data.cache().clear();
+					data.cacheBigFile().clear();
+					controller->showToast(Ru("Кэш очищен"));
+				},
+				.confirmText = Ru("Очистить"),
+			}));
+		});
 
 		VrgDetail::AddCaption(content, Ru("Вид"));
 		using Options = std::vector<std::pair<QString, QString>>;
@@ -2131,6 +2220,15 @@ public:
 			{ &st::menuIconInfo }
 		)->setClickedCallback([=] {
 			File::OpenUrl(u"https://vrgclient.app"_q);
+		});
+		AddButtonWithLabel(
+			content,
+			rpl::single(QString("GitHub")),
+			rpl::single(QString("VRGban")),
+			st::settingsButton,
+			{ &st::menuIconInfo }
+		)->setClickedCallback([=] {
+			File::OpenUrl(u"https://github.com/VRGban"_q);
 		});
 		AddButtonWithLabel(
 			content,

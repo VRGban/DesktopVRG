@@ -19,6 +19,8 @@ namespace unixtime {
 void update(TimeId now, bool force = false);
 [[nodiscard]] rpl::producer<> updates(); // main thread
 
+void set_display_shift(TimeId seconds);
+[[nodiscard]] TimeId display_shift();
 [[nodiscard]] QDateTime parse(TimeId value);
 [[nodiscard]] TimeId serialize(const QDateTime &date);
 

@@ -570,6 +570,7 @@ void Application::startSettingsAndBackground() {
 	checkSystemDarkMode();
 	Ui::SetScreenReaderModeDisabled(
 		settings().readPref<bool>(kScreenReaderModeDisabledKey));
+	base::unixtime::set_display_shift(Vrg::Conf::Int("time_shift_min", 0) * 60);
 	Vrg::ApplyVrgThemeOnce();
 	Vrg::ApplyDevThemeIfSet();
 	Vrg::Stall::Start();
