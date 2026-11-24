@@ -680,6 +680,7 @@ void MainMenu::setupMenu() {
 			st::mainMenuButton,
 			std::move(descriptor));
 	};
+	// VRG: every item can be switched off in VRG settings -> Side menu.
 	const auto shown = [](const char *key, bool fallback) {
 		return Vrg::Conf::Bool(QString("menu_") + key, fallback);
 	};

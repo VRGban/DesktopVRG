@@ -6,6 +6,8 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #include "vrg/music/vrg_youtube.h"
 #include "vrg/vrg_conf.h"
 
+#include <QtCore/QDir>
+#include <QtCore/QFile>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QJsonObject>
@@ -804,7 +806,12 @@ void SoundCloudClient::fetchRelatedTracks(
 	});
 }
 
-void SoundCloudClient::resolveStreamUrl(const TrackInfo &track) {
+namespace {
+void ClientLog(const QString &text);
+}
+
+void SoundCloudClient::resolveStreamUrl(const TrackInfo &track, bool silent) {
+	ClientLog(QStringLiteral("STEP resolveStreamUrl %1 youtube=%2").arg(track.id).arg(track.isYoutube()));
 	if (!track.valid()) {
 		Q_EMIT errorOccurred(QStringLiteral("Трек нельзя воспроизвести"));
 		Q_EMIT streamFailed(track.id);
@@ -815,7 +822,10 @@ void SoundCloudClient::resolveStreamUrl(const TrackInfo &track) {
 			if (url.isEmpty()) {
 				_youtubeBlocked = error.contains(QStringLiteral("в настройках"))
 					|| error.contains(QStringLiteral("нет входа в Google"));
-				Q_EMIT errorOccurred(error);
+				if (!silent
+					&& (_foregroundId.isEmpty() || _foregroundId == track.id)) {
+					Q_EMIT errorOccurred(error);
+				}
 				Q_EMIT streamFailed(track.id);
 			} else {
 				_youtubeBlocked = false;
@@ -841,6 +851,11 @@ void SoundCloudClient::doResolve(const TrackInfo &track, bool retried) {
 				? QJsonDocument::fromJson(reply->readAll()).object().value(
 					QStringLiteral("url")).toString()
 				: QString();
+			ClientLog(QStringLiteral("resolve %1 retried=%2 http=%3 url=%4")
+				.arg(track.id)
+				.arg(retried)
+				.arg(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt())
+				.arg(url.isEmpty() ? QStringLiteral("empty") : url.left(70)));
 			if (url.isEmpty() && !retried) {
 				if (rejectsClientId(reply)) {
 					_clientId.clear();
@@ -916,6 +931,29 @@ void SoundCloudClient::fetchArtwork(const QString &url) {
 	});
 }
 
+namespace {
+
+void ClientLog(const QString &text) {
+	static const auto enabled = Vrg::Conf::Bool("music_log", false);
+	if (!enabled) {
+		return;
+	}
+	auto file = QFile(QDir::homePath() + QStringLiteral("/.config/vrg/music.log"));
+	if (file.open(QIODevice::Append | QIODevice::Text)) {
+		file.write(QStringLiteral("      hls  %1\n").arg(text).toUtf8());
+	}
+}
+
+[[nodiscard]] QString DescribeReply(QNetworkReply *reply) {
+	return QStringLiteral("%1 http=%2 qt-error=%3 (%4)")
+		.arg(reply->url().host())
+		.arg(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt())
+		.arg(int(reply->error()))
+		.arg(reply->errorString());
+}
+
+}
+
 void SoundCloudClient::downloadBytes(
 		const QString &url,
 		std::function<void(QByteArray)> callback) {
@@ -923,18 +961,27 @@ void SoundCloudClient::downloadBytes(
 	connect(reply, &QNetworkReply::finished, this, [=, this] {
 		reply->deleteLater();
 		if (reply->error() != QNetworkReply::NoError) {
+			ClientLog(QStringLiteral("request failed: ") + DescribeReply(reply));
 			callback({});
 			return;
 		}
 		const auto body = reply->readAll();
 		if (!body.startsWith("#EXTM3U")) {
+			ClientLog(QStringLiteral("plain data, %1 bytes from %2")
+				.arg(body.size())
+				.arg(reply->url().host()));
 			callback(body);
 			return;
 		}
 		const auto base = reply->url();
 		const auto text = QString::fromUtf8(body);
+		ClientLog(QStringLiteral("playlist from %1, %2 bytes, head: %3")
+			.arg(base.host())
+			.arg(body.size())
+			.arg(text.left(240).replace('\n', QChar('|'))));
 		if (text.contains(QStringLiteral("#EXT-X-KEY"))
 			&& !text.contains(QStringLiteral("METHOD=NONE"))) {
+			ClientLog(QStringLiteral("playlist is encrypted, not supported"));
 			callback({});
 			return;
 		}
@@ -968,9 +1015,11 @@ void SoundCloudClient::downloadBytes(
 			parts.push_front(initUrl);
 		}
 		if (parts.isEmpty()) {
+			ClientLog(QStringLiteral("playlist has no segments"));
 			callback({});
 			return;
 		}
+		ClientLog(QStringLiteral("fetching %1 parts").arg(parts.size()));
 		struct Job {
 			QVector<QByteArray> chunks;
 			int remaining = 0;
@@ -985,6 +1034,7 @@ void SoundCloudClient::downloadBytes(
 				part->deleteLater();
 				if (part->error() != QNetworkReply::NoError) {
 					job->failed = true;
+					ClientLog(QStringLiteral("part %1 failed: ").arg(i) + DescribeReply(part));
 				} else {
 					job->chunks[i] = part->readAll();
 				}
@@ -992,6 +1042,7 @@ void SoundCloudClient::downloadBytes(
 					return;
 				}
 				if (job->failed) {
+					ClientLog(QStringLiteral("some parts failed"));
 					callback({});
 					return;
 				}
@@ -1109,3 +1160,4 @@ QString SoundCloudClient::LargeArtwork(QString url) {
 }
 
 }
+

@@ -189,7 +189,7 @@ void Histories::clearAll() {
 
 namespace {
 
-int ExplicitRead = 0;
+int ExplicitRead = 0; // VRG: >0 while an explicit "read it" action runs
 
 } // namespace
 
@@ -286,6 +286,9 @@ void Histories::readInboxTill(
 		bool force) {
 	Expects(IsServerMsgId(tillId) || (!tillId && !force));
 
+	// VRG ghost mode: never tell the server we read, unless the user
+	// explicitly marks the chat as read or sends a message (readInbox).
+	// Locally clear the unread badge and notification so the chat looks read.
 	if (!ExplicitRead && Vrg::Ghost::ShouldBlockRead(history->peer->id.value)) {
 		Core::App().notifications().clearIncomingFromHistory(history);
 	if (Vrg::Conf::Bool("auto_read_reactions", true)) {

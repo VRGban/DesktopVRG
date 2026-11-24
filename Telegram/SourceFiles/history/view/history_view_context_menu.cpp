@@ -5,6 +5,7 @@ the official desktop application for the Telegram messaging service.
 For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
+#include "vrg/vrg_read_times.h"
 #include "history/view/history_view_context_menu.h"
 #include "data/data_histories.h"
 #include "vrg/vrg_edit_history.h"
@@ -2129,6 +2130,25 @@ void FillContextMenuItems(
 	if (item) {
 		const auto added = (result->actions().size() > wasAmount);
 		AddSelectRestrictionAction(result, item, !added);
+	}
+	if (item
+		&& item->out()
+		&& item->isRegular()
+		&& item->history()->peer->isUser()
+		&& item->id <= item->history()->outboxReadTillId()) {
+		if (const auto when = Vrg::ReadTimes::When(
+				item->history()->peer->id.value,
+				item->id.bare)) {
+			if (!result->empty()) {
+				result->addSeparator();
+			}
+			result->addAction(
+				QString::fromUtf8("Прочитано: ")
+					+ QDateTime::fromSecsSinceEpoch(when).toString(
+						QStringLiteral("dd.MM.yyyy HH:mm:ss")),
+				[] {},
+				nullptr);
+		}
 	}
 	if (!skipWhoReacted) {
 		if (hasWhoReactedItem) {

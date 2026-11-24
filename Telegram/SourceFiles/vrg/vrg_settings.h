@@ -42,6 +42,8 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #include "vrg/vrg_badges.h"
 #include "vrg/vrg_chat_lock.h"
 #include "vrg/vrg_conf.h"
+#include "vrg/vrg_deleted.h"
+#include "vrg/vrg_store.h"
 #include "vrg/vrg_fake_profile.h"
 #include "vrg/vrg_fake_profile_section.h"
 #include "vrg/vrg_ghost.h"
@@ -81,7 +83,7 @@ namespace Settings {
 
 namespace VrgDetail {
 
-inline constexpr auto kVersion = "1.0.6";
+inline constexpr auto kVersion = "1.0.7";
 
 [[nodiscard]] inline QString Ru(const char *text) {
 	return QString::fromUtf8(text);
@@ -255,6 +257,12 @@ inline void AddConfSwitch(
 		}
 	}, container->lifetime());
 	if (!info.isEmpty()) {
+		const auto padding = st::settingsButtonNoIcon.padding;
+		row->setPaddingOverride(style::margins(
+			padding.left(),
+			padding.top(),
+			std::max(padding.right(), 128),
+			padding.bottom()));
 		AddInfo(row, text, info);
 	}
 }
@@ -941,6 +949,14 @@ public:
 				"навсегда между перезапусками VRG."));
 		VrgDetail::AddConfSwitch(
 			card,
+			Ru("Сохранять удалённые у ботов"),
+			"keep_bots",
+			true,
+			rpl::never<bool>(),
+			Ru("Если выключить, сообщения из чатов с ботами удаляются сразу и "
+				"не остаются с пометкой «удалено»."));
+		VrgDetail::AddConfSwitch(
+			card,
 			Ru("Сохранять одноразовые медиа"),
 			"keep_ttl",
 			true,
@@ -980,6 +996,25 @@ public:
 					auto &data = controller->session().data();
 					data.cache().clear();
 					data.cacheBigFile().clear();
+					const auto keys = Vrg::Deleted::All();
+					for (const auto &key : keys) {
+						Vrg::Deleted::MarkPermanent(key.first, key.second);
+					}
+					for (const auto &key : keys) {
+						const auto id = FullMsgId(
+							PeerId(PeerIdHelper(key.first)),
+							MsgId(key.second));
+						if (const auto item = data.message(id)) {
+							item->destroy();
+						}
+					}
+					Vrg::Deleted::ForgetAll();
+					Vrg::Store::ClearAll(&controller->session());
+					crl::on_main(&controller->session(), [keys] {
+						for (const auto &key : keys) {
+							Vrg::Deleted::ClearPermanent(key.first, key.second);
+						}
+					});
 					controller->showToast(Ru("Кэш очищен"));
 				},
 				.confirmText = Ru("Очистить"),
@@ -1700,7 +1735,6 @@ public:
 			rpl::never<bool>(),
 			Ru("Показывает окно подтверждения при выборе GIF."));
 
-
 		Ui::ResizeFitChild(this, content);
 	}
 
@@ -2396,3 +2430,4 @@ inline Type VrgFakeProfileId() { return VrgFakeProfile::Id(); }
 inline Type VrgSupportId() { return VrgSupport::Id(); }
 
 }
+

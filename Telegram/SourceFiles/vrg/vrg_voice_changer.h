@@ -268,3 +268,4 @@ inline void ApplyPreset(const QString &id) {
 }
 
 }
+

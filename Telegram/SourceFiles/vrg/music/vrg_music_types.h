@@ -62,3 +62,4 @@ enum class PlaybackState {
 }
 
 Q_DECLARE_METATYPE(Vrg::Music::TrackInfo)
+

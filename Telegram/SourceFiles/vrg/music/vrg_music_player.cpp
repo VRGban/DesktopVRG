@@ -3,6 +3,7 @@ This file is part of VRG, a fork of Telegram Desktop.
 Licensed under GPLv3 with the same exceptions as the upstream project.
 */
 #include "vrg/music/vrg_music_player.h"
+#include "vrg/music/vrg_mp4_adts.h"
 #include "vrg/music/vrg_mpris.h"
 
 #include "vrg/music/vrg_soundcloud_client.h"
@@ -29,6 +30,12 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #include <QtCore/QUrlQuery>
 #include <QtCore/QUuid>
 #include <QtMultimedia/QAudioBuffer>
+#include "vrg/music/vrg_pcm_decode.h"
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <mmsystem.h>
+#pragma comment(lib, "winmm.lib")
+#endif
 #include <QtMultimedia/QAudioBufferOutput>
 #include <QtMultimedia/QAudioDevice>
 #include <QtMultimedia/QAudioFormat>
@@ -169,6 +176,19 @@ private:
 
 namespace {
 
+[[nodiscard]] QString AudioExtension(const QByteArray &bytes) {
+	if (bytes.size() > 12) {
+		const auto tag = bytes.mid(4, 4);
+		if (tag == "ftyp" || tag == "styp" || tag == "moof") {
+			return QStringLiteral("m4a");
+		}
+	}
+	if (bytes.startsWith("OggS")) {
+		return QStringLiteral("ogg");
+	}
+	return QStringLiteral("mp3");
+}
+
 void MusicLog(const QString &text) {
 	static const auto enabled = Vrg::Conf::Bool("music_log", false);
 	if (!enabled) {
@@ -186,15 +206,482 @@ void MusicLog(const QString &text) {
 
 }
 
+#ifdef Q_OS_WIN
+namespace {
+
+constexpr auto kWinRate = 44100;
+constexpr auto kWinChannels = 2;
+constexpr auto kWinBlockFrames = 2205;
+constexpr auto kWinBlockBytes = kWinBlockFrames * kWinChannels * 2;
+
+}
+
+WinMediaPlayer::WinMediaPlayer(QObject *parent)
+: QObject(parent)
+, _blocks(kBuffers)
+, _inFlight(kBuffers, 0) {
+	_headers = new WAVEHDR[kBuffers]();
+	for (auto &block : _blocks) {
+		block.resize(kWinBlockBytes);
+	}
+	_pumpTimer = new QTimer(this);
+	_pumpTimer->setInterval(15);
+	connect(_pumpTimer, &QTimer::timeout, this, [this] { pump(); });
+	_positionTimer = new QTimer(this);
+	_positionTimer->setInterval(100);
+	connect(_positionTimer, &QTimer::timeout, this, [this] {
+		if (_state == QMediaPlayer::PlayingState) {
+			Q_EMIT positionChanged(position());
+		}
+	});
+}
+
+WinMediaPlayer::~WinMediaPlayer() {
+	closeDevice();
+	delete[] static_cast<WAVEHDR*>(_headers);
+}
+
+void WinMediaPlayer::setAudioOutput(QAudioOutput *output) {
+	_output = output;
+	if (_output) {
+		_gain = _output->volume();
+		connect(_output, &QAudioOutput::volumeChanged, this, [this](float volume) {
+			_gain = volume;
+		});
+	}
+}
+
+void WinMediaPlayer::setAudioBufferOutput(QAudioBufferOutput *output) {
+	_processorActive = (output != nullptr);
+}
+
+void WinMediaPlayer::setProcessor(std::function<void(float*, int)> processor) {
+	_processor = std::move(processor);
+}
+
+QUrl WinMediaPlayer::source() const {
+	return _source;
+}
+
+QIODevice *WinMediaPlayer::sourceDevice() const {
+	return _device;
+}
+
+QMediaPlayer::PlaybackState WinMediaPlayer::playbackState() const {
+	return _state;
+}
+
+QMediaPlayer::MediaStatus WinMediaPlayer::mediaStatus() const {
+	return _status;
+}
+
+bool WinMediaPlayer::isSeekable() const {
+	return _frames > 0;
+}
+
+qint64 WinMediaPlayer::duration() const {
+	return framesToMs(_frames);
+}
+
+qint64 WinMediaPlayer::framesToMs(qint64 frames) const {
+	return frames * 1000 / kWinRate;
+}
+
+qint64 WinMediaPlayer::playedFrames() const {
+	if (!_handle) {
+		return 0;
+	}
+	auto time = MMTIME();
+	time.wType = TIME_SAMPLES;
+	if (waveOutGetPosition(
+			static_cast<HWAVEOUT>(_handle),
+			&time,
+			sizeof(time)) != MMSYSERR_NOERROR
+		|| time.wType != TIME_SAMPLES) {
+		return 0;
+	}
+	return qint64(time.u.sample);
+}
+
+qint64 WinMediaPlayer::position() const {
+	if (_frames <= 0) {
+		return 0;
+	}
+	auto frame = _baseFrame;
+	if (_handle && (_state != QMediaPlayer::StoppedState)) {
+		frame += playedFrames();
+	}
+	return framesToMs(std::clamp<qint64>(frame, 0, _frames));
+}
+
+void WinMediaPlayer::setStatus(QMediaPlayer::MediaStatus status) {
+	if (_status == status) {
+		return;
+	}
+	_status = status;
+	Q_EMIT mediaStatusChanged(_status);
+}
+
+void WinMediaPlayer::setPlaybackState(QMediaPlayer::PlaybackState state) {
+	if (_state == state) {
+		return;
+	}
+	_state = state;
+	Q_EMIT playbackStateChanged(_state);
+}
+
+bool WinMediaPlayer::loadWav(const QByteArray &data) {
+	if (data.size() < 44
+		|| !data.startsWith("RIFF")
+		|| data.mid(8, 4) != "WAVE") {
+		return false;
+	}
+	auto offset = 12;
+	auto pcmOffset = -1;
+	auto pcmSize = qint64(0);
+	auto formatOk = false;
+	const auto le16 = [&](int at) {
+		return quint16(quint8(data[at]) | (quint8(data[at + 1]) << 8));
+	};
+	const auto le32 = [&](int at) {
+		return quint32(quint8(data[at])
+			| (quint8(data[at + 1]) << 8)
+			| (quint8(data[at + 2]) << 16)
+			| (quint32(quint8(data[at + 3])) << 24));
+	};
+	while (offset + 8 <= data.size()) {
+		const auto id = data.mid(offset, 4);
+		const auto size = qint64(le32(offset + 4));
+		const auto body = offset + 8;
+		if (id == "fmt " && size >= 16 && body + 16 <= data.size()) {
+			formatOk = (le16(body) == 1)
+				&& (le16(body + 2) == kWinChannels)
+				&& (le32(body + 4) == kWinRate)
+				&& (le16(body + 14) == 16);
+		} else if (id == "data") {
+			pcmOffset = body;
+			pcmSize = std::min<qint64>(size, data.size() - body);
+			break;
+		}
+		offset = int(body + size + (size & 1));
+	}
+	if (!formatOk || pcmOffset < 0 || pcmSize <= 0) {
+		return false;
+	}
+	pcmSize -= pcmSize % (kWinChannels * 2);
+	_pcm = data.mid(pcmOffset, int(pcmSize));
+	_frames = pcmSize / (kWinChannels * 2);
+	return true;
+}
+
+void WinMediaPlayer::clearMedia() {
+	closeDevice();
+	_pcm.clear();
+	_frames = 0;
+	_baseFrame = 0;
+	_writeFrame = 0;
+}
+
+void WinMediaPlayer::setSource(const QUrl &url) {
+	clearMedia();
+	_device = nullptr;
+	_source = url;
+	setPlaybackState(QMediaPlayer::StoppedState);
+	if (url.isEmpty()) {
+		setStatus(QMediaPlayer::NoMedia);
+		Q_EMIT durationChanged(0);
+		return;
+	}
+	setStatus(QMediaPlayer::LoadingMedia);
+	auto file = QFile(url.toLocalFile());
+	if (!url.isLocalFile() || !file.open(QIODevice::ReadOnly)
+		|| !loadWav(file.readAll())) {
+		setStatus(QMediaPlayer::InvalidMedia);
+		Q_EMIT errorOccurred(
+			QMediaPlayer::FormatError,
+			QStringLiteral("Unsupported media source"));
+		return;
+	}
+	Q_EMIT durationChanged(duration());
+	Q_EMIT seekableChanged(true);
+	setStatus(QMediaPlayer::LoadedMedia);
+}
+
+void WinMediaPlayer::setSourceDevice(QIODevice *device, const QUrl &url) {
+	clearMedia();
+	_device = device;
+	_source = url;
+	setPlaybackState(QMediaPlayer::StoppedState);
+	if (!device) {
+		setStatus(QMediaPlayer::NoMedia);
+		Q_EMIT durationChanged(0);
+		return;
+	}
+	setStatus(QMediaPlayer::LoadingMedia);
+	auto data = QByteArray();
+	if (const auto buffer = qobject_cast<QBuffer*>(device)) {
+		data = buffer->data();
+	} else {
+		device->seek(0);
+		data = device->readAll();
+	}
+	if (!loadWav(data)) {
+		setStatus(QMediaPlayer::InvalidMedia);
+		Q_EMIT errorOccurred(
+			QMediaPlayer::FormatError,
+			QStringLiteral("Unsupported media source"));
+		return;
+	}
+	Q_EMIT durationChanged(duration());
+	Q_EMIT seekableChanged(true);
+	setStatus(QMediaPlayer::LoadedMedia);
+}
+
+bool WinMediaPlayer::openDevice() {
+	if (_handle) {
+		return true;
+	}
+	auto format = WAVEFORMATEX();
+	format.wFormatTag = WAVE_FORMAT_PCM;
+	format.nChannels = kWinChannels;
+	format.nSamplesPerSec = kWinRate;
+	format.wBitsPerSample = 16;
+	format.nBlockAlign = kWinChannels * 2;
+	format.nAvgBytesPerSec = kWinRate * format.nBlockAlign;
+	auto handle = HWAVEOUT();
+	const auto result = waveOutOpen(
+		&handle,
+		WAVE_MAPPER,
+		&format,
+		0,
+		0,
+		CALLBACK_NULL);
+	if (result != MMSYSERR_NOERROR) {
+		Q_EMIT errorOccurred(
+			QMediaPlayer::ResourceError,
+			QStringLiteral("waveOutOpen failed: %1").arg(int(result)));
+		return false;
+	}
+	_handle = handle;
+	auto *headers = static_cast<WAVEHDR*>(_headers);
+	for (auto i = 0; i != kBuffers; ++i) {
+		headers[i] = WAVEHDR();
+		_inFlight[i] = 0;
+	}
+	return true;
+}
+
+void WinMediaPlayer::closeDevice() {
+	_pumpTimer->stop();
+	_positionTimer->stop();
+	if (!_handle) {
+		return;
+	}
+	const auto handle = static_cast<HWAVEOUT>(_handle);
+	waveOutReset(handle);
+	auto *headers = static_cast<WAVEHDR*>(_headers);
+	for (auto i = 0; i != kBuffers; ++i) {
+		if (_inFlight[i]) {
+			waveOutUnprepareHeader(handle, &headers[i], sizeof(WAVEHDR));
+			_inFlight[i] = 0;
+		}
+	}
+	waveOutClose(handle);
+	_handle = nullptr;
+}
+
+void WinMediaPlayer::fillBuffer(int index) {
+	const auto handle = static_cast<HWAVEOUT>(_handle);
+	auto *headers = static_cast<WAVEHDR*>(_headers);
+	const auto frames = int(std::min<qint64>(
+		kWinBlockFrames,
+		_frames - _writeFrame));
+	if (frames <= 0) {
+		return;
+	}
+	const auto samples = frames * kWinChannels;
+	const auto *source = reinterpret_cast<const qint16*>(_pcm.constData())
+		+ _writeFrame * kWinChannels;
+	auto *target = reinterpret_cast<qint16*>(_blocks[index].data());
+	if (_processorActive && _processor) {
+		_scratch.resize(size_t(samples));
+		for (auto i = 0; i != samples; ++i) {
+			_scratch[size_t(i)] = float(source[i]) / 32768.f;
+		}
+		_processor(_scratch.data(), frames);
+		for (auto i = 0; i != samples; ++i) {
+			const auto value = std::clamp(
+				_scratch[size_t(i)] * 32767.f,
+				-32768.f,
+				32767.f);
+			target[i] = qint16(value);
+		}
+	} else {
+		for (auto i = 0; i != samples; ++i) {
+			const auto value = std::clamp(
+				float(source[i]) * _gain,
+				-32768.f,
+				32767.f);
+			target[i] = qint16(value);
+		}
+	}
+	auto &header = headers[index];
+	header = WAVEHDR();
+	header.lpData = _blocks[index].data();
+	header.dwBufferLength = DWORD(samples * 2);
+	if (waveOutPrepareHeader(handle, &header, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+		return;
+	}
+	if (waveOutWrite(handle, &header, sizeof(WAVEHDR)) != MMSYSERR_NOERROR) {
+		waveOutUnprepareHeader(handle, &header, sizeof(WAVEHDR));
+		return;
+	}
+	_inFlight[index] = 1;
+	_writeFrame += frames;
+}
+
+void WinMediaPlayer::pump() {
+	if (!_handle) {
+		return;
+	}
+	const auto handle = static_cast<HWAVEOUT>(_handle);
+	auto *headers = static_cast<WAVEHDR*>(_headers);
+	auto busy = 0;
+	for (auto i = 0; i != kBuffers; ++i) {
+		if (_inFlight[i] && (headers[i].dwFlags & WHDR_DONE)) {
+			waveOutUnprepareHeader(handle, &headers[i], sizeof(WAVEHDR));
+			_inFlight[i] = 0;
+		}
+		if (!_inFlight[i] && _writeFrame < _frames) {
+			fillBuffer(i);
+		}
+		if (_inFlight[i]) {
+			++busy;
+		}
+	}
+	if (busy == 0 && _writeFrame >= _frames) {
+		finishPlayback();
+	}
+}
+
+void WinMediaPlayer::finishPlayback() {
+	closeDevice();
+	_baseFrame = 0;
+	_writeFrame = 0;
+	_status = QMediaPlayer::EndOfMedia;
+	_state = QMediaPlayer::StoppedState;
+	Q_EMIT playbackStateChanged(_state);
+	Q_EMIT mediaStatusChanged(_status);
+}
+
+void WinMediaPlayer::play() {
+	if (_frames <= 0 || _state == QMediaPlayer::PlayingState) {
+		return;
+	}
+	if (_state == QMediaPlayer::PausedState && _handle) {
+		waveOutRestart(static_cast<HWAVEOUT>(_handle));
+		setPlaybackState(QMediaPlayer::PlayingState);
+		_positionTimer->start();
+		return;
+	}
+	if (_status == QMediaPlayer::EndOfMedia || _baseFrame >= _frames) {
+		_baseFrame = 0;
+	}
+	closeDevice();
+	if (!openDevice()) {
+		return;
+	}
+	_writeFrame = _baseFrame;
+	setPlaybackState(QMediaPlayer::PlayingState);
+	setStatus(QMediaPlayer::BufferedMedia);
+	pump();
+	_pumpTimer->start();
+	_positionTimer->start();
+}
+
+void WinMediaPlayer::pause() {
+	if (_state != QMediaPlayer::PlayingState) {
+		return;
+	}
+	if (_handle) {
+		waveOutPause(static_cast<HWAVEOUT>(_handle));
+	}
+	_positionTimer->stop();
+	setPlaybackState(QMediaPlayer::PausedState);
+}
+
+void WinMediaPlayer::stop() {
+	const auto wasActive = (_state != QMediaPlayer::StoppedState);
+	closeDevice();
+	_baseFrame = 0;
+	_writeFrame = 0;
+	if (_status == QMediaPlayer::BufferedMedia
+		|| _status == QMediaPlayer::EndOfMedia) {
+		_status = QMediaPlayer::LoadedMedia;
+		Q_EMIT mediaStatusChanged(_status);
+	}
+	if (wasActive) {
+		setPlaybackState(QMediaPlayer::StoppedState);
+	}
+	Q_EMIT positionChanged(0);
+}
+
+void WinMediaPlayer::setPosition(qint64 positionMs) {
+	if (_frames <= 0) {
+		return;
+	}
+	const auto frame = std::clamp<qint64>(
+		positionMs * kWinRate / 1000,
+		0,
+		_frames);
+	if (_handle && _state != QMediaPlayer::StoppedState) {
+		const auto handle = static_cast<HWAVEOUT>(_handle);
+		const auto paused = (_state == QMediaPlayer::PausedState);
+		waveOutReset(handle);
+		auto *headers = static_cast<WAVEHDR*>(_headers);
+		for (auto i = 0; i != kBuffers; ++i) {
+			if (_inFlight[i]) {
+				waveOutUnprepareHeader(handle, &headers[i], sizeof(WAVEHDR));
+				_inFlight[i] = 0;
+			}
+		}
+		_baseFrame = frame;
+		_writeFrame = frame;
+		if (paused) {
+			waveOutPause(handle);
+		} else {
+			waveOutRestart(handle);
+		}
+		pump();
+	} else {
+		_baseFrame = frame;
+		_writeFrame = frame;
+	}
+	Q_EMIT positionChanged(position());
+}
+#endif
+
 Player::Player(SoundCloudClient *client, QObject *parent)
 : QObject(parent)
 , _client(client)
-, _media(new QMediaPlayer(this))
+, _media(new MediaBackend(this))
 , _output(new QAudioOutput(this))
 , _downloader(new QNetworkAccessManager(this)) {
 	Q_ASSERT(_client != nullptr);
+	MusicLog(QStringLiteral("STEP ctor: begin"));
+	{
+		const auto outputs = QMediaDevices::audioOutputs();
+		MusicLog(QStringLiteral("audio outputs: %1, default: %2")
+			.arg(outputs.size())
+			.arg(QMediaDevices::defaultAudioOutput().description()));
+	}
 
 	_media->setAudioOutput(_output);
+#ifdef Q_OS_WIN
+	_media->setProcessor([this](float *samples, int frames) {
+		_dsp.processStereoFloat(samples, frames);
+	});
+#endif
 	_output->setVolume(0.f);
 	_dsp.setVolumeGain(_volume);
 
@@ -210,6 +697,7 @@ Player::Player(SoundCloudClient *client, QObject *parent)
 		&QAudioBufferOutput::audioBufferReceived,
 		this,
 		[this](const QAudioBuffer &buffer) {
+			_bufferSeen = true;
 			if (!buffer.isValid() || buffer.frameCount() <= 0) {
 				return;
 			}
@@ -248,25 +736,40 @@ Player::Player(SoundCloudClient *client, QObject *parent)
 		this,
 		&Player::handleStreamFailure);
 
-	connect(_media, &QMediaPlayer::positionChanged, this, [=, this](
+	connect(_media, &MediaBackend::positionChanged, this, [=, this](
 			qint64 position) {
 		MusicLog(QStringLiteral("media position %1, pending %2, muted %3").arg(position).arg(_pendingSeekMs).arg(_resumeMuted));
 		Q_EMIT positionChanged(this->position());
 	});
-	connect(_media, &QMediaPlayer::seekableChanged, this, [=, this] {
+	connect(_media, &MediaBackend::seekableChanged, this, [=, this] {
 		trySeekPending();
 	});
-	connect(_media, &QMediaPlayer::durationChanged, this, [=, this] {
+	connect(_media, &MediaBackend::durationChanged, this, [=, this] {
 		trySeekPending();
 		Q_EMIT durationChanged(duration());
 	});
-	connect(_media, &QMediaPlayer::playbackStateChanged, this, [=, this](
+	connect(_media, &MediaBackend::playbackStateChanged, this, [=, this](
 			QMediaPlayer::PlaybackState state) {
 		switch (state) {
 		case QMediaPlayer::PlayingState:
 			MusicLog(QStringLiteral("playing after %1 ms").arg(_loadClock.isValid() ? _loadClock.elapsed() : -1));
 			_failuresInRow = 0;
 			setState(PlaybackState::Playing);
+#ifndef Q_OS_WIN
+			if (_audioRoute == 1 && !_bufferSeen && !_noBufferOutput) {
+				QTimer::singleShot(3000, this, [this] {
+					if (_audioRoute == 1
+						&& !_bufferSeen
+						&& !_noBufferOutput
+						&& _state == PlaybackState::Playing) {
+						MusicLog(QStringLiteral("no audio buffers from the backend, switching to direct output"));
+						_noBufferOutput = true;
+						_audioRoute = -1;
+						updateAudioRoute();
+					}
+				});
+			}
+#endif
 			if (_positionTimer && !_positionTimer->isActive()) {
 				_positionTimer->start();
 			}
@@ -283,12 +786,35 @@ Player::Player(SoundCloudClient *client, QObject *parent)
 			prefetchNext();
 			break;
 		case QMediaPlayer::PausedState:
+			MusicLog(QStringLiteral("backend paused, state %1").arg(int(_state)));
 			if (_positionTimer) {
 				_positionTimer->stop();
 			}
 			setState(PlaybackState::Paused);
 			break;
 		case QMediaPlayer::StoppedState:
+			MusicLog(QStringLiteral("backend stopped, state %1, status %2, byUs %3")
+				.arg(int(_state))
+				.arg(int(_media->mediaStatus()))
+				.arg(_stopByUs));
+#ifdef Q_OS_WIN
+			if (!_stopByUs
+				&& _state == PlaybackState::Playing
+				&& _media->mediaStatus() != QMediaPlayer::EndOfMedia
+				&& _media->mediaStatus() != QMediaPlayer::NoMedia
+				&& _media->mediaStatus() != QMediaPlayer::InvalidMedia
+				&& _autoResumes < 20) {
+				++_autoResumes;
+				MusicLog(QStringLiteral("backend stopped by itself, resuming (%1)").arg(_autoResumes));
+				QTimer::singleShot(120, this, [this] {
+					if (_state == PlaybackState::Playing
+						&& _media->playbackState() != QMediaPlayer::PlayingState) {
+						_media->play();
+					}
+				});
+				return;
+			}
+#endif
 			if (_positionTimer) {
 				_positionTimer->stop();
 			}
@@ -298,8 +824,9 @@ Player::Player(SoundCloudClient *client, QObject *parent)
 			break;
 		}
 	});
-	connect(_media, &QMediaPlayer::mediaStatusChanged, this, [=, this](
+	connect(_media, &MediaBackend::mediaStatusChanged, this, [=, this](
 			QMediaPlayer::MediaStatus status) {
+		MusicLog(QStringLiteral("media status changed: %1").arg(int(status)));
 		if (status == QMediaPlayer::LoadedMedia
 			|| status == QMediaPlayer::BufferedMedia) {
 			MusicLog(QStringLiteral("media status %1 after %2 ms, media duration %3 ms, api duration %4 ms")
@@ -307,6 +834,7 @@ Player::Player(SoundCloudClient *client, QObject *parent)
 				.arg(_loadClock.isValid() ? _loadClock.elapsed() : -1)
 				.arg(_media->duration())
 				.arg(currentTrack().durationMs));
+			_silentRetries = 0;
 			trySeekPending();
 		} else if (status == QMediaPlayer::EndOfMedia) {
 			handleEndOfMedia();
@@ -319,15 +847,20 @@ Player::Player(SoundCloudClient *client, QObject *parent)
 			}
 		}
 	});
-	connect(_media, &QMediaPlayer::errorOccurred, this, [=, this](
+	connect(_media, &MediaBackend::errorOccurred, this, [=, this](
 			QMediaPlayer::Error error,
 			const QString &message) {
+		MusicLog(QStringLiteral("media error %1: %2").arg(int(error)).arg(message));
 		if (error == QMediaPlayer::NoError) {
 			return;
 		}
 		if (const auto track = currentTrack(); track.valid()) {
-			if (_cacheBuffer || !freshStreamUrl(track.id).isEmpty()) {
+			if ((_cacheBuffer || !freshStreamUrl(track.id).isEmpty())
+				&& _silentRetries < 2) {
+				++_silentRetries;
+				_stopByUs = true;
 				_media->stop();
+				_stopByUs = false;
 				_media->setSource(QUrl());
 				if (_cacheBuffer) {
 					_cacheBuffer->close();
@@ -376,22 +909,32 @@ Player::Player(SoundCloudClient *client, QObject *parent)
 		connect(qApp, &QCoreApplication::aboutToQuit, this, &Player::saveState);
 	}
 
+	MusicLog(QStringLiteral("STEP ctor: connections done, loadLibrary"));
 	loadLibrary();
+	MusicLog(QStringLiteral("STEP ctor: loadState"));
 	loadState();
+	MusicLog(QStringLiteral("STEP ctor: loadStreamUrls"));
 	loadStreamUrls();
+	MusicLog(QStringLiteral("STEP ctor: updateAudioRoute"));
 	updateAudioRoute();
+	MusicLog(QStringLiteral("STEP ctor: check current track"));
 	if (const auto track = currentTrack();
 		track.valid()
 			&& !isTrackCached(track.id)
 			&& freshStreamUrl(track.id).isEmpty()) {
+		MusicLog(QStringLiteral("STEP ctor: resolving %1").arg(track.id));
 		_prefetching.insert(track.id);
 		_client->resolveStreamUrl(track);
 	}
+	MusicLog(QStringLiteral("STEP ctor: end"));
 }
 
 Player::~Player() {
 	saveState();
 	_media->stop();
+	if (!_tempTrackPath.isEmpty()) {
+		QFile::remove(_tempTrackPath);
+	}
 	QDir(QDir::tempPath() + QStringLiteral("/vrg-send")).removeRecursively();
 }
 
@@ -608,7 +1151,9 @@ void Player::setVoiceActive(bool active) {
 }
 
 void Player::stop() {
+	_stopByUs = true;
 	_media->stop();
+	_stopByUs = false;
 	resetAudioSink();
 	setState(PlaybackState::Stopped);
 }
@@ -813,13 +1358,40 @@ void Player::startIndex(int index, qint64 resumeMs) {
 	++_seekSerial;
 	_seekAttempts = 0;
 	_lastSeekAttemptMs = 0;
+	{
+		const auto candidate = _queue[index].id;
+		if (candidate == _restartTrackId
+			&& _restartClock.isValid()
+			&& _restartClock.elapsed() < 6000) {
+			++_restartCount;
+		} else {
+			_restartTrackId = candidate;
+			_restartCount = 1;
+		}
+		_restartClock.restart();
+		if (_restartCount > 4) {
+			MusicLog(QStringLiteral("restart loop stopped for %1").arg(candidate));
+			_restartCount = 0;
+			_restartTrackId.clear();
+			const auto title = _queue[index].title;
+			stop();
+			Q_EMIT errorOccurred(QStringLiteral("Не удалось загрузить трек «%1». Нажми на него ещё раз или выбери другой.")
+				.arg(title));
+			return;
+		}
+	}
 	_index = index;
 	_failureHandled = false;
 	_silentRetry = false;
+	_silentRetries = 0;
 	const auto track = _queue[_index];
+	_client->setForegroundTrack(track.id);
 	setState(PlaybackState::Loading);
+	_autoResumes = 0;
+	_stopByUs = true;
 	_media->stop();
 	_media->setSource(QUrl());
+	_stopByUs = false;
 	if (_cacheBuffer) {
 		_cacheBuffer->close();
 		delete _cacheBuffer;
@@ -835,21 +1407,14 @@ void Player::startIndex(int index, qint64 resumeMs) {
 		cachedBytes = ReadCachedBytes(track.id);
 	}
 	if (!cachedBytes.isEmpty()) {
-		const auto &bytes = cachedBytes;
-		{
-			_cacheBuffer = new QBuffer(this);
-			_cacheBuffer->setData(bytes);
-			_cacheBuffer->open(QIODevice::ReadOnly);
-			_media->setSourceDevice(
-				_cacheBuffer,
-				QUrl(QStringLiteral("track.mp3")));
-			startPlayback();
-			return;
-		}
+		playBytes(cachedBytes);
+		return;
 	}
 	if (const auto url = freshStreamUrl(track.id); !url.isEmpty()) {
-		_media->setSource(QUrl(url));
-		startPlayback();
+		MusicLog(QStringLiteral("using cached stream url for %1, age %2 ms")
+			.arg(track.id)
+			.arg(QDateTime::currentMSecsSinceEpoch() - _streamUrls.value(track.id).second));
+		playStreamUrl(track.id, url);
 		return;
 	}
 	_client->resolveStreamUrl(track);
@@ -913,9 +1478,11 @@ void Player::startPlayback() {
 
 QString Player::freshStreamUrl(const QString &trackId) const {
 	const auto i = _streamUrls.constFind(trackId);
-	if (i == _streamUrls.constEnd()
-		|| QDateTime::currentMSecsSinceEpoch() - i->second
-			>= 8 * 60 * 1000) {
+	if (i == _streamUrls.constEnd()) {
+		return QString();
+	}
+	const auto age = QDateTime::currentMSecsSinceEpoch() - i->second;
+	if (age < 0 || age >= 8 * 60 * 1000) {
 		return QString();
 	}
 	return i->first;
@@ -948,11 +1515,18 @@ void Player::prefetchNext() {
 	}
 	_prefetching.insert(track.id);
 	_ramWanted.insert(track.id);
-	_client->resolveStreamUrl(track);
+	_client->resolveStreamUrl(track, true);
 }
 
 void Player::advance(bool userAction) {
+	MusicLog(QStringLiteral("advance user=%1 index=%2 failureHandled=%3")
+		.arg(userAction)
+		.arg(_index)
+		.arg(_failureHandled));
 	if (_queue.isEmpty()) {
+		return;
+	}
+	if (!userAction && _failureHandled) {
 		return;
 	}
 	if (!userAction && _repeat == RepeatMode::One && _index >= 0) {
@@ -1064,6 +1638,105 @@ void Player::applyStream(const QString &trackId, const QString &url) {
 	if (_state != PlaybackState::Loading || currentTrack().id != trackId) {
 		return;
 	}
+	playStreamUrl(trackId, url);
+}
+
+void Player::playBytes(const QByteArray &bytes) {
+	if (_cacheBuffer) {
+		_cacheBuffer->close();
+		delete _cacheBuffer;
+		_cacheBuffer = nullptr;
+	}
+	auto data = bytes;
+	auto extension = AudioExtension(bytes);
+	MusicLog(QStringLiteral("playBytes: %1 bytes, ext %2, head %3")
+		.arg(bytes.size())
+		.arg(extension)
+		.arg(QString::fromLatin1(bytes.left(16).toHex(' '))));
+#ifdef Q_OS_WIN
+	{
+		auto why = QString();
+		auto wav = Pcm::DecodeToWav(bytes, &why);
+		if (wav.isEmpty()) {
+			MusicLog(QStringLiteral("ffmpeg decode failed: %1").arg(why));
+		} else {
+			MusicLog(QStringLiteral("ffmpeg decoded: %1 -> %2 bytes wav")
+				.arg(bytes.size())
+				.arg(wav.size()));
+			data = std::move(wav);
+			extension = QStringLiteral("wav");
+		}
+	}
+#endif
+	_cacheBuffer = new QBuffer(this);
+	_cacheBuffer->setData(data);
+	_cacheBuffer->open(QIODevice::ReadOnly);
+	_media->setSourceDevice(
+		_cacheBuffer,
+		QUrl(QStringLiteral("track.") + extension));
+	startPlayback();
+}
+
+bool Player::playFromTempFile(const QByteArray &data, const QString &extension) {
+	const auto dir = QDir(QDir::tempPath() + QStringLiteral("/vrg-music"));
+	if (!dir.exists() && !QDir().mkpath(dir.absolutePath())) {
+		MusicLog(QStringLiteral("temp dir failed: %1").arg(dir.absolutePath()));
+		return false;
+	}
+	if (!_tempTrackPath.isEmpty()) {
+		QFile::remove(_tempTrackPath);
+		_tempTrackPath.clear();
+	}
+	const auto path = dir.filePath(QStringLiteral("track-%1.%2")
+		.arg(++_tempTrackCounter)
+		.arg(extension));
+	auto file = QFile(path);
+	if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size()) {
+		MusicLog(QStringLiteral("temp file write failed: %1").arg(path));
+		return false;
+	}
+	file.close();
+	_tempTrackPath = path;
+	MusicLog(QStringLiteral("playing from file: %1 (%2 bytes)").arg(path).arg(data.size()));
+	_media->setSource(QUrl::fromLocalFile(path));
+	return true;
+}
+
+void Player::playStreamUrl(const QString &trackId, const QString &url) {
+#ifdef Q_OS_WIN
+	{
+		if (const auto cached = ramBytes(trackId); !cached.isEmpty()) {
+			playBytes(cached);
+			return;
+		}
+		_client->downloadBytes(url, [=, this](QByteArray bytes) {
+			if (bytes.isEmpty()) {
+				MusicLog(QStringLiteral("hls fetch failed: %1").arg(trackId));
+				if (_silentRetries < 2
+					&& _state == PlaybackState::Loading
+					&& currentTrack().id == trackId) {
+					++_silentRetries;
+					MusicLog(QStringLiteral("hls retry %1 for %2: dropping cached url").arg(_silentRetries).arg(trackId));
+					_streamUrls.remove(trackId);
+					saveStreamUrls();
+					_client->resolveStreamUrl(currentTrack());
+					return;
+				}
+				handleStreamFailure(trackId);
+				return;
+			}
+			MusicLog(QStringLiteral("hls fetched %1: %2 bytes").arg(trackId).arg(bytes.size()));
+			_ram.insert(trackId, bytes);
+			touchRam(trackId);
+			if (_state != PlaybackState::Loading
+				|| currentTrack().id != trackId) {
+				return;
+			}
+			playBytes(bytes);
+		});
+		return;
+	}
+#endif
 	_media->setSource(QUrl(url));
 	startPlayback();
 }
@@ -1073,6 +1746,10 @@ void Player::handleEndOfMedia() {
 }
 
 void Player::handleStreamFailure(const QString &trackId) {
+	MusicLog(QStringLiteral("stream failure %1, current %2, handled %3")
+		.arg(trackId)
+		.arg(currentTrack().id)
+		.arg(_failureHandled));
 	if (_prefetching.remove(trackId)
 		&& (_state != PlaybackState::Loading
 			|| currentTrack().id != trackId)) {
@@ -1582,7 +2259,8 @@ void Player::ensureAudioSink(int sampleRate, int channels) {
 }
 
 void Player::updateAudioRoute() {
-	const auto custom = _dsp.enabled() || _dsp.boostGain() > 1.001f;
+	const auto custom = (_dsp.enabled() || _dsp.boostGain() > 1.001f)
+		&& !_noBufferOutput;
 	const auto route = custom ? 1 : 0;
 	if (route == _audioRoute) {
 		return;
@@ -1705,7 +2383,7 @@ void Player::loadStreamUrls() {
 		const auto entry = it.value().toObject();
 		const auto url = entry.value(QStringLiteral("u")).toString();
 		const auto ts = qint64(entry.value(QStringLiteral("t")).toDouble(0));
-		if (!url.isEmpty() && (now - ts) < 8 * 60 * 1000) {
+		if (!url.isEmpty() && (now - ts) >= 0 && (now - ts) < 8 * 60 * 1000) {
 			_streamUrls.insert(it.key(), { url, ts });
 		}
 	}
@@ -1809,20 +2487,27 @@ void Player::loadState() {
 			loadedQueue.push_back(track);
 		}
 	}
+	MusicLog(QStringLiteral("STEP loadState: parsed %1 tracks").arg(loadedQueue.size()));
 	if (!loadedQueue.isEmpty()) {
 		_queue = std::move(loadedQueue);
 		const auto savedIndex = root.value(QStringLiteral("index")).toInt(0);
 		_index = (savedIndex >= 0 && savedIndex < _queue.size())
 			? savedIndex
 			: 0;
+		MusicLog(QStringLiteral("STEP loadState: index %1 shuffle %2, rebuilding order").arg(_index).arg(_shuffle));
 		rebuildOrder();
 		_pendingSeekMs = std::max(
 			qint64(0),
 			root.value(QStringLiteral("positionMs")).toVariant().toLongLong());
+		MusicLog(QStringLiteral("STEP loadState: emit queueChanged"));
 		Q_EMIT queueChanged();
+		MusicLog(QStringLiteral("STEP loadState: emit currentTrackChanged"));
 		Q_EMIT currentTrackChanged(currentTrack());
+		MusicLog(QStringLiteral("STEP loadState: emit durationChanged"));
 		Q_EMIT durationChanged(duration());
+		MusicLog(QStringLiteral("STEP loadState: emit positionChanged"));
 		Q_EMIT positionChanged(_pendingSeekMs);
+		MusicLog(QStringLiteral("STEP loadState: done"));
 	}
 }
 
@@ -1844,3 +2529,4 @@ Player *SharedPlayer() {
 }
 
 }
+

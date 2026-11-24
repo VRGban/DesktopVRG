@@ -27,6 +27,7 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 #include "lang/lang_keys.h"
 #include "vrg/vrg_chat_lock.h"
 #include "vrg/vrg_deleted.h"
+#include "vrg/vrg_store.h"
 #include "vrg/vrg_deleted_section.h"
 #include "vrg/vrg_ghost.h"
 #include "vrg/vrg_peer_actions.h"
@@ -637,7 +638,25 @@ void Filler::addVrgSubmenu() {
 			menu->addAction(
 				QString::fromUtf8("Очистить удалёнки"),
 				[=] {
-					Vrg::Deleted::ForgetPeer(peer->id.value);
+					const auto peerRaw = uint64(peer->id.value);
+					const auto ids = Vrg::Deleted::ListForPeer(peerRaw);
+					for (const auto id : ids) {
+						Vrg::Deleted::MarkPermanent(peerRaw, id);
+					}
+					for (const auto id : ids) {
+						if (const auto item = peer->owner().message(
+								peer->id,
+								MsgId(id))) {
+							item->destroy();
+						}
+					}
+					Vrg::Deleted::ForgetPeer(peerRaw);
+					Vrg::Store::ErasePeer(&peer->session(), peerRaw);
+					crl::on_main(&peer->session(), [peerRaw, ids] {
+						for (const auto id : ids) {
+							Vrg::Deleted::ClearPermanent(peerRaw, id);
+						}
+					});
 					controller->showToast(
 						QString::fromUtf8("Удалённые сообщения очищены"));
 				},

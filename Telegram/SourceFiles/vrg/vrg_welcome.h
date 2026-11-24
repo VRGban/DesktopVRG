@@ -525,3 +525,4 @@ inline void ScheduleWelcome(not_null<Core::Application*> app) {
 }
 
 }
+

@@ -5,6 +5,7 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #pragma once
 
 #include "data/data_peer.h"
+#include "data/data_user.h"
 #include "data/data_session.h"
 #include "history/history.h"
 #include "history/history_item.h"
@@ -105,6 +106,22 @@ public:
 		}
 	}
 
+	[[nodiscard]] static std::vector<std::pair<uint64, int64>> All() {
+		return { Set().begin(), Set().end() };
+	}
+
+	static void ForgetAll() {
+		Set().clear();
+	}
+
+	[[nodiscard]] static bool SkippedBot(not_null<const HistoryItem*> item) {
+		if (Conf::Bool("keep_bots", true)) {
+			return false;
+		}
+		const auto user = item->history()->peer->asUser();
+		return user && user->isBot();
+	}
+
 	static void MarkPermanent(uint64 peer, int64 id) {
 		PermanentSet().insert({ peer, id });
 	}
@@ -147,6 +164,7 @@ public:
 			return false;
 		}
 		if (!Enabled()
+			|| SkippedBot(item)
 			|| !item->isRegular()
 			|| item->isService()) {
 			return false;
@@ -193,3 +211,4 @@ private:
 };
 
 }
+

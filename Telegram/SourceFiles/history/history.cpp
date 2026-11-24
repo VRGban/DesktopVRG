@@ -5,6 +5,7 @@ the official desktop application for the Telegram messaging service.
 For license and copyright information please follow this link:
 https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
+#include "vrg/vrg_read_times.h"
 #include "vrg/vrg_store.h"
 #include "vrg/vrg_deleted.h"
 #include "history/history.h"
@@ -2327,6 +2328,9 @@ void History::inboxRead(not_null<const HistoryItem*> wasRead) {
 }
 
 void History::outboxRead(MsgId upTo) {
+	if (peer->isUser() && upTo.bare > outboxReadTillId().bare) {
+		Vrg::ReadTimes::Record(peer->id.value, upTo.bare);
+	}
 	setOutboxReadTill(upTo);
 	if (const auto last = chatListMessage()) {
 		if (last->out() && last->isRegular() && last->id <= upTo) {

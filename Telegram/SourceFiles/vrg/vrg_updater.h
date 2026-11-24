@@ -25,7 +25,7 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 
 namespace Vrg::Updater {
 
-inline constexpr auto kCurrentVersion = "1.0.6";
+inline constexpr auto kCurrentVersion = "1.0.7";
 
 namespace Detail {
 
@@ -155,3 +155,4 @@ inline void CheckOnce(std::shared_ptr<Ui::Show> show) {
 }
 
 }
+

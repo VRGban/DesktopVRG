@@ -217,3 +217,4 @@ void ReleaseMusicWidget(VRGMusicWidget *widget);
 	Window::SessionController *controller);
 
 }
+

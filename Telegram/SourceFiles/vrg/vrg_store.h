@@ -71,6 +71,10 @@ public:
 		account.erase(Key{ peer, id });
 	}
 
+	static void ClearAll(not_null<Main::Session*> session) {
+		For(session).clearAll();
+	}
+
 	static void ErasePeer(not_null<Main::Session*> session, uint64 peer) {
 		auto &account = For(session);
 		account.erasePeer(peer);
@@ -365,6 +369,17 @@ private:
 			rewriteMarks();
 		}
 
+		void clearAll() {
+			deleted.clear();
+			index.clear();
+			if (data) {
+				data->close();
+				data->open(QIODevice::ReadWrite | QIODevice::Truncate);
+				data->seek(0);
+			}
+			rewriteMarks();
+		}
+
 		void erasePeer(uint64 peer) {
 			deleted.remove(peer);
 			for (auto it = index.begin(); it != index.end(); ) {
@@ -534,3 +549,4 @@ private:
 };
 
 }
+

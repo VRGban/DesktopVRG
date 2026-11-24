@@ -40,3 +40,4 @@ inline void ScheduleDevOpen(not_null<Core::Application*> app) {
 }
 
 }
+

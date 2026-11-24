@@ -347,7 +347,7 @@ inline void FetchPending() {
 			}
 		} else {
 			for (const auto id : ids) {
-				Detail::Checked()[id] = now - 240;
+				Detail::Checked()[id] = now - 30;
 			}
 		}
 		reply->deleteLater();
@@ -366,7 +366,7 @@ inline void FetchPending() {
 	const auto now = QDateTime::currentSecsSinceEpoch();
 	const auto &checked = Detail::Checked();
 	const auto c = checked.find(userId);
-	if (c == checked.end() || (now - c->second) > 300) {
+	if (c == checked.end() || (now - c->second) > 40) {
 		if (Detail::PendingIds().insert(userId).second) {
 			QTimer::singleShot(200, [] { FetchPending(); });
 		}
@@ -566,8 +566,8 @@ inline void ShowInfoBox(
 
 		const auto tiers = box->verticalLayout()->add(
 			object_ptr<Ui::RpWidget>(box));
-		tiers->resize(tiers->width(), 168);
-		tiers->setMinimumHeight(168);
+		tiers->resize(tiers->width(), 196);
+		tiers->setMinimumHeight(196);
 		tiers->paintRequest() | rpl::on_next([=] {
 			QPainter p(tiers);
 			p.setRenderHint(QPainter::TextAntialiasing);
@@ -576,19 +576,19 @@ inline void ShowInfoBox(
 					const QStringList &kinds,
 					const QString &title,
 					const QString &text) {
-				auto x = st::boxRowPadding.left();
+				const auto left = st::boxRowPadding.left();
+				auto x = left;
 				for (const auto &kind : kinds) {
-					Paint(p, QRect(x, top + 6, 28, 28), kind);
+					Paint(p, QRect(x, top + 2, 28, 28), kind);
 					x += 38;
 				}
-				const auto textLeft = st::boxRowPadding.left() + 4 * 38 + 6;
 				p.setPen(st::windowFg);
 				p.setFont(st::semiboldFont);
-				p.drawText(textLeft, top + 16, title);
+				p.drawText(left, top + 50, title);
 				p.setPen(st::windowSubTextFg);
 				p.setFont(st::normalFont);
 				p.drawText(
-					QRect(textLeft, top + 22, tiers->width() - textLeft - 12, 40),
+					QRect(left, top + 56, tiers->width() - left * 2, 40),
 					Qt::TextWordWrap,
 					text);
 			};
@@ -598,7 +598,7 @@ inline void ShowInfoBox(
 				QString::fromUtf8("Supporter — от 3 $"),
 				QString::fromUtf8("Один значок навсегда, менять его нельзя."));
 			drawTier(
-				84,
+				98,
 				{ u"supp2_crown"_q, u"supp2_moon"_q, u"supp2_bolt"_q, u"supp2_heart"_q },
 				QString::fromUtf8("Luna — от 50 $"),
 				QString::fromUtf8("Можно менять значок: корона, луна, молния или сердце."));
@@ -617,3 +617,4 @@ inline void ShowInfoBox(
 }
 
 }
+

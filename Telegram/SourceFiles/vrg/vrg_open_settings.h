@@ -14,3 +14,4 @@ void OpenPlayerSettings(Window::SessionController *controller);
 void OpenSupportSettings(Window::SessionController *controller);
 
 }
+

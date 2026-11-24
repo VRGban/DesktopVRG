@@ -41,3 +41,4 @@ inline void Set(uint64 peerId, const QString &name) {
 }
 
 }
+

@@ -64,7 +64,7 @@ public:
 		std::function<void(QVector<TrackInfo>)> callback,
 		bool retried = false);
 
-	void resolveStreamUrl(const TrackInfo &track);
+	void resolveStreamUrl(const TrackInfo &track, bool silent = false);
 
 	void downloadBytes(
 		const QString &url,
@@ -76,6 +76,9 @@ public:
 
 	[[nodiscard]] bool hasClientId() const;
 
+	void setForegroundTrack(const QString &id) {
+		_foregroundId = id;
+	}
 	[[nodiscard]] bool youtubeBlocked() const {
 		return _youtubeBlocked;
 	}
@@ -129,6 +132,7 @@ private:
 	QStringList _scriptUrls;
 
 	bool _youtubeBlocked = false;
+	QString _foregroundId;
 	int _searchSerial = 0;
 	std::pair<int, QVector<TrackInfo>> _pendingSoundcloud;
 	std::pair<int, QVector<TrackInfo>> _pendingYoutube;
@@ -139,3 +143,4 @@ private:
 };
 
 }
+

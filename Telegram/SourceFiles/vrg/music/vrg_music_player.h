@@ -15,7 +15,15 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #include <QtCore/QString>
 #include <QtCore/QVector>
 
+#ifdef Q_OS_WIN
+#include <QtCore/QByteArray>
+#include <QtCore/QUrl>
+#include <QtMultimedia/QMediaPlayer>
+#include <functional>
+#include <vector>
+#else
 class QMediaPlayer;
+#endif
 class QAudioOutput;
 class QAudioBufferOutput;
 class QAudioSink;
@@ -28,6 +36,83 @@ namespace Vrg::Music {
 
 class AudioRingBufferDevice;
 class SoundCloudClient;
+
+#ifdef Q_OS_WIN
+class WinMediaPlayer final : public QObject {
+	Q_OBJECT
+
+public:
+	explicit WinMediaPlayer(QObject *parent = nullptr);
+	~WinMediaPlayer();
+
+	void setAudioOutput(QAudioOutput *output);
+	void setAudioBufferOutput(QAudioBufferOutput *output);
+	void setProcessor(std::function<void(float*, int)> processor);
+	void setSource(const QUrl &url);
+	void setSourceDevice(QIODevice *device, const QUrl &url = QUrl());
+	[[nodiscard]] QUrl source() const;
+	[[nodiscard]] QIODevice *sourceDevice() const;
+	[[nodiscard]] QMediaPlayer::PlaybackState playbackState() const;
+	[[nodiscard]] QMediaPlayer::MediaStatus mediaStatus() const;
+	[[nodiscard]] qint64 position() const;
+	[[nodiscard]] qint64 duration() const;
+	[[nodiscard]] bool isSeekable() const;
+
+public Q_SLOTS:
+	void play();
+	void pause();
+	void stop();
+	void setPosition(qint64 positionMs);
+
+Q_SIGNALS:
+	void positionChanged(qint64 position);
+	void durationChanged(qint64 duration);
+	void seekableChanged(bool seekable);
+	void playbackStateChanged(QMediaPlayer::PlaybackState state);
+	void mediaStatusChanged(QMediaPlayer::MediaStatus status);
+	void errorOccurred(QMediaPlayer::Error error, const QString &message);
+
+private:
+	static constexpr int kBuffers = 8;
+
+	bool loadWav(const QByteArray &data);
+	void clearMedia();
+	void setStatus(QMediaPlayer::MediaStatus status);
+	void setPlaybackState(QMediaPlayer::PlaybackState state);
+	bool openDevice();
+	void closeDevice();
+	void pump();
+	void fillBuffer(int index);
+	void finishPlayback();
+	[[nodiscard]] qint64 framesToMs(qint64 frames) const;
+	[[nodiscard]] qint64 playedFrames() const;
+
+	QByteArray _pcm;
+	qint64 _frames = 0;
+	qint64 _baseFrame = 0;
+	qint64 _writeFrame = 0;
+	QUrl _source;
+	QIODevice *_device = nullptr;
+	QAudioOutput *_output = nullptr;
+	bool _processorActive = false;
+	std::function<void(float*, int)> _processor;
+	float _gain = 1.f;
+	QMediaPlayer::PlaybackState _state = QMediaPlayer::StoppedState;
+	QMediaPlayer::MediaStatus _status = QMediaPlayer::NoMedia;
+	void *_handle = nullptr;
+	void *_headers = nullptr;
+	std::vector<QByteArray> _blocks;
+	std::vector<char> _inFlight;
+	QTimer *_pumpTimer = nullptr;
+	QTimer *_positionTimer = nullptr;
+	std::vector<float> _scratch;
+
+};
+
+using MediaBackend = WinMediaPlayer;
+#else
+using MediaBackend = QMediaPlayer;
+#endif
 
 class Player final : public QObject {
 	Q_OBJECT
@@ -135,6 +220,7 @@ private:
 	bool _resumeMuted = false;
 	QElapsedTimer _loadClock;
 	bool _silentRetry = false;
+	int _silentRetries = 0;
 	void prefetchNext();
 	[[nodiscard]] QString freshStreamUrl(const QString &trackId) const;
 	void advance(bool userAction);
@@ -142,6 +228,8 @@ private:
 	[[nodiscard]] int orderPosition() const;
 	void setState(PlaybackState state);
 	void applyStream(const QString &trackId, const QString &url);
+	void playStreamUrl(const QString &trackId, const QString &url);
+	void playBytes(const QByteArray &bytes);
 	void handleEndOfMedia();
 	void handleStreamFailure(const QString &trackId);
 
@@ -158,7 +246,7 @@ private:
 	void resetAudioSink();
 
 	SoundCloudClient * const _client;
-	QMediaPlayer *_media = nullptr;
+	MediaBackend *_media = nullptr;
 	QAudioOutput *_output = nullptr;
 	QAudioBufferOutput *_bufferOutput = nullptr;
 	QAudioSink *_audioSink = nullptr;
@@ -178,6 +266,13 @@ private:
 	void trySeekPending();
 	void updateAudioRoute();
 	int _audioRoute = -1;
+	bool _bufferSeen = false;
+	bool _noBufferOutput = false;
+	QString _tempTrackPath;
+	int _tempTrackCounter = 0;
+	bool _stopByUs = false;
+	int _autoResumes = 0;
+	[[nodiscard]] bool playFromTempFile(const QByteArray &data, const QString &extension);
 	QSet<QString> _prefetching;
 	QHash<QString, QByteArray> _ram;
 	QStringList _ramOrder;
@@ -195,6 +290,9 @@ private:
 	int _index = -1;
 	QVector<int> _order;
 	int _manualAhead = 0;
+	QString _restartTrackId;
+	int _restartCount = 0;
+	QElapsedTimer _restartClock;
 	void removeQueueIndex(int queueIndex);
 
 	QVector<TrackInfo> _library;
@@ -216,3 +314,4 @@ private:
 [[nodiscard]] Player *SharedPlayer();
 
 }
+

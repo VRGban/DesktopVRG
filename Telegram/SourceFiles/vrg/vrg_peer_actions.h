@@ -185,3 +185,4 @@ inline void DeleteAllMyMessages(
 }
 
 }
+

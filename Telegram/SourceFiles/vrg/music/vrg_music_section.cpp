@@ -151,7 +151,6 @@ void SectionWidget::paintEvent(QPaintEvent *e) {
 	p.fillRect(0, st::topBarHeight - st::lineWidth, width(), st::lineWidth, st::shadowFg);
 }
 
-
 void SectionWidget::layoutMusic() {
 	if (!_music) {
 		return;
@@ -254,3 +253,4 @@ bool SectionWidget::eventFilter(QObject *watched, QEvent *event) {
 }
 
 }
+

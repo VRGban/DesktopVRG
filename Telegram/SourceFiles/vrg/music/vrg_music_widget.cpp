@@ -7,6 +7,7 @@ Licensed under GPLv3 with the same exceptions as the upstream project.
 #include "vrg/vrg_open_settings.h"
 
 #include "vrg/vrg_conf.h"
+#include <QtWidgets/QScrollBar>
 #include "vrg/music/vrg_music_player.h"
 #include "vrg/music/vrg_music_section.h"
 #include "vrg/music/vrg_soundcloud_client.h"
@@ -1659,10 +1660,6 @@ public:
 		switch (role) {
 		case Qt::DisplayRole:
 			return track.title;
-		case Qt::ToolTipRole:
-			return track.artist.isEmpty()
-				? track.title
-				: (track.artist + QStringLiteral(" — ") + track.title);
 		case kTrackRole:
 			return QVariant::fromValue(track);
 		}
@@ -2672,10 +2669,39 @@ VRGMusicWidget::VRGMusicWidget(
 	_libraryModel->setTracks(_player->library());
 	refreshPlaylists();
 	refreshCounters();
-	setTab(_player->library().isEmpty() ? Tab::Search : Tab::Library);
+	auto startTab = _player->library().isEmpty() ? Tab::Search : Tab::Library;
+	switch (Vrg::Conf::Int("music_tab", -1)) {
+	case 0: startTab = Tab::Search; break;
+	case 1: startTab = Tab::Library; break;
+	case 2: startTab = Tab::Playlists; break;
+	}
+	const auto savedPlaylist = Vrg::Conf::Str("music_playlist");
+	setTab(startTab);
+	if (startTab == Tab::Playlists
+		&& !savedPlaylist.isEmpty()
+		&& _player->findPlaylist(savedPlaylist)) {
+		openPlaylist(savedPlaylist);
+	}
+	const auto savedScroll = Vrg::Conf::Int("music_scroll", 0);
+	if (savedScroll > 0) {
+		QTimer::singleShot(0, this, [this, savedScroll] {
+			_list->verticalScrollBar()->setValue(savedScroll);
+		});
+	}
+	const auto scrollTimer = new QTimer(this);
+	scrollTimer->setSingleShot(true);
+	scrollTimer->setInterval(800);
+	connect(scrollTimer, &QTimer::timeout, this, [this] {
+		Vrg::Conf::SetInt("music_scroll", _list->verticalScrollBar()->value());
+	});
+	connect(_list->verticalScrollBar(), &QScrollBar::valueChanged, scrollTimer, qOverload<>(&QTimer::start));
 }
 
-VRGMusicWidget::~VRGMusicWidget() = default;
+VRGMusicWidget::~VRGMusicWidget() {
+	if (_list) {
+		Vrg::Conf::SetInt("music_scroll", _list->verticalScrollBar()->value());
+	}
+}
 
 Player *VRGMusicWidget::player() const {
 	return _player;
@@ -2952,6 +2978,11 @@ void VRGMusicWidget::setupUi() {
 	connect(_search, &QLineEdit::textChanged, this, &VRGMusicWidget::applyLocalFilter);
 	connect(_searchTab, &QPushButton::clicked, this, [this] {
 		setTab(Tab::Search);
+		if (!_searching
+			&& _searchModel->rowCount() == 0
+			&& !_search->text().trimmed().isEmpty()) {
+			runSearch();
+		}
 	});
 	connect(_libraryTab, &QPushButton::clicked, this, [this] {
 		setTab(Tab::Library);
@@ -3004,6 +3035,7 @@ void VRGMusicWidget::setTab(Tab tab) {
 		Q_EMIT fullscreenLyricsChanged(false);
 	}
 	_tab = tab;
+	Vrg::Conf::SetInt("music_tab", int(tab));
 	_searchTab->setChecked(tab == Tab::Search);
 	_libraryTab->setChecked(tab == Tab::Library);
 	_playlistsTab->setChecked(tab == Tab::Playlists);
@@ -3047,6 +3079,7 @@ void VRGMusicWidget::applyLocalFilter() {
 			_playlistTracksModel->setTracks(out);
 		}
 	}
+	refreshStatus();
 }
 
 TrackListModel *VRGMusicWidget::currentModel() const {
@@ -3074,6 +3107,30 @@ void VRGMusicWidget::runSearch() {
 	_client->searchTracks(query);
 }
 
+namespace {
+
+[[nodiscard]] QString TotalDurationText(const QVector<TrackInfo> &tracks) {
+	auto total = qint64(0);
+	for (const auto &track : tracks) {
+		total += std::max<qint64>(track.durationMs, 0);
+	}
+	const auto minutes = total / 60000;
+	if (minutes <= 0) {
+		return QString();
+	}
+	const auto days = minutes / (60 * 24);
+	const auto hours = (minutes / 60) % 24;
+	const auto mins = minutes % 60;
+	if (days > 0) {
+		return QStringLiteral("%1 д %2 ч").arg(days).arg(hours);
+	} else if (hours > 0) {
+		return QStringLiteral("%1 ч %2 мин").arg(hours).arg(mins);
+	}
+	return QStringLiteral("%1 мин").arg(mins);
+}
+
+}
+
 void VRGMusicWidget::refreshCounters() {
 	const auto &lib = _player->library();
 	const auto total = int(lib.size());
@@ -3090,8 +3147,12 @@ void VRGMusicWidget::refreshCounters() {
 	_playlistsTab->setText(plCount > 0
 		? QStringLiteral("Плейлисты · %1").arg(plCount)
 		: QStringLiteral("Плейлисты"));
+	const auto libraryLength = TotalDurationText(lib);
 	_libraryCounterLabel->setText(
-		QStringLiteral("Треков: %1   ·   Офлайн: %2 / %1").arg(total).arg(offline));
+		QStringLiteral("Треков: %1   ·   Офлайн: %2 / %1").arg(total).arg(offline)
+		+ (libraryLength.isEmpty()
+			? QString()
+			: QStringLiteral("   ·   ") + libraryLength));
 	_libraryBar->setVisible(_tab == Tab::Library && total > 0);
 	if (!_activePlaylistId.isEmpty()) {
 		if (const auto pl = _player->findPlaylist(_activePlaylistId)) {
@@ -3102,9 +3163,13 @@ void VRGMusicWidget::refreshCounters() {
 				}
 			}
 			const auto plTotal = int(pl->tracks.size());
+			const auto plLength = TotalDurationText(pl->tracks);
 			_playlistTitleLabel->setText(plTotal > 0
 				? QStringLiteral("%1   ·   Офлайн: %2 / %3")
 					.arg(pl->name).arg(plOffline).arg(plTotal)
+					+ (plLength.isEmpty()
+						? QString()
+						: QStringLiteral("   ·   ") + plLength)
 				: pl->name);
 		}
 	}
@@ -3130,9 +3195,13 @@ void VRGMusicWidget::refreshStatus() {
 				: QStringLiteral("Введите название трека или исполнителя\nи нажмите Enter");
 		}
 	} else if (_tab == Tab::Library && _libraryModel->rowCount() == 0) {
-		text = QStringLiteral("Здесь пока пусто.\nДобавляйте треки кнопкой +");
+		text = (_search && !_search->text().trimmed().isEmpty())
+			? QStringLiteral("Ничего не найдено")
+			: QStringLiteral("Здесь пока пусто.\nДобавляйте треки кнопкой +");
 	} else if (_tab == Tab::Playlists && _playlistTracksModel->rowCount() == 0) {
-		text = QStringLiteral("Плейлист пуст.\nДобавляйте треки кнопкой ≡+ из поиска или библиотеки");
+		text = (_search && !_search->text().trimmed().isEmpty())
+			? QStringLiteral("Ничего не найдено")
+			: QStringLiteral("Плейлист пуст.\nДобавляйте треки кнопкой ≡+ из поиска или библиотеки");
 	}
 	_status->setText(text);
 	_pages->setCurrentWidget(text.isEmpty()
@@ -3180,9 +3249,12 @@ void VRGMusicWidget::refreshPlaylists() {
 		cover->setPixmap(RoundedArtwork(plPix, 44, 8, std::max(devicePixelRatioF(), 1.) * MusicZoomFactor()));
 
 		const auto infoBtn = new QPushButton(
-			QStringLiteral("%1\n%2 треков")
+			QStringLiteral("%1\n%2 треков%3")
 				.arg(pl.name)
-				.arg(pl.tracks.size()),
+				.arg(pl.tracks.size())
+				.arg(TotalDurationText(pl.tracks).isEmpty()
+					? QString()
+					: QStringLiteral(" · ") + TotalDurationText(pl.tracks)),
 			card);
 		SetQss(infoBtn, QStringLiteral(
 			"QPushButton { background: transparent; color: #ffffff; border: none; "
@@ -3244,6 +3316,7 @@ void VRGMusicWidget::openPlaylist(const QString &playlistId) {
 		return;
 	}
 	_activePlaylistId = playlistId;
+	Vrg::Conf::Set("music_playlist", playlistId);
 	_playlistTitleLabel->setText(pl->name);
 	_playlistTracksModel->setTracks(pl->tracks);
 	_playlistBar->show();
@@ -3256,6 +3329,7 @@ void VRGMusicWidget::openPlaylist(const QString &playlistId) {
 
 void VRGMusicWidget::closePlaylist() {
 	_activePlaylistId.clear();
+	Vrg::Conf::Set("music_playlist", QString());
 	_playlistBar->hide();
 	_delegate->playlistRemoveMode = false;
 	refreshStatus();
@@ -4529,3 +4603,4 @@ QWidget *CreateChatsMiniBar(
 }
 
 #include "vrg_music_widget.moc"
+
